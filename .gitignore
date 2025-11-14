@@ -217,7 +217,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Timetracker
-.timetracker/
+.timetracker
 
 # Logs
 logs/

@@ -1,9 +1,12 @@
 import time
 import asyncio
+import logging
 from enum import Enum
 from collections import deque
 from typing import Optional, Dict, Any
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 class RequestPriority(Enum):
@@ -22,7 +25,6 @@ class QueuedRequest:
     response_future: asyncio.Future = field(compare=False)
 
     def __post_init__(self):
-        # Untuk proper sorting (lower number = higher priority)
         self.sort_key = (self.priority, self.timestamp)
 
 
@@ -41,6 +43,7 @@ class ModelRequestQueue:
         self.total_requests = 0
         self.total_processed = 0
         self.total_rejected = 0
+        self.current_processing = 0  # Track concurrent processing
 
     async def enqueue(
         self,
@@ -49,15 +52,15 @@ class ModelRequestQueue:
         priority: RequestPriority = RequestPriority.NORMAL,
         timeout: float = 300
     ) -> Dict[Any, Any]:
-        """Add request to queue dan tunggu hasil."""
+        """Add request to queue and wait for result."""
 
         async with self.lock:
             # Check queue capacity
             if len(self.queue) >= self.max_queue_size:
                 self.total_rejected += 1
                 raise RuntimeError(
-                    f"Queue untuk model '{self.model_alias}' penuh. "
-                    f"Coba lagi nanti atau gunakan model lain."
+                    f"Queue for model '{self.model_alias}' is full ({self.max_queue_size}). "
+                    f"Try again later or use another model."
                 )
 
             # Create queued request
@@ -71,7 +74,7 @@ class ModelRequestQueue:
                 response_future=response_future
             )
 
-            # Insert dengan priority (lower priority value = higher priority)
+            # Insert with priority
             inserted = False
             for i, existing_req in enumerate(self.queue):
                 if queued_req.sort_key < existing_req.sort_key:
@@ -85,18 +88,18 @@ class ModelRequestQueue:
             self.total_requests += 1
             self.queue_not_empty.set()
 
-        # Wait untuk response dengan timeout
+        # Wait for response with timeout
         try:
             result = await asyncio.wait_for(response_future, timeout=timeout)
             return result
         except asyncio.TimeoutError:
-            # Remove dari queue jika timeout
+            # Remove from queue if timeout
             async with self.lock:
                 try:
                     self.queue.remove(queued_req)
                 except ValueError:
                     pass  # Already processed
-            raise TimeoutError(f"Request timeout setelah {timeout} detik")
+            raise TimeoutError(f"Request timeout after {timeout}s")
 
     async def dequeue(self) -> Optional[QueuedRequest]:
         """Get next request from queue."""
@@ -112,12 +115,13 @@ class ModelRequestQueue:
             "total_requests": self.total_requests,
             "total_processed": self.total_processed,
             "total_rejected": self.total_rejected,
+            "current_processing": self.current_processing,
             "processing": self.processing
         }
 
 
 class QueueManager:
-    """Manage queues untuk semua models."""
+    """Manage queues for all models."""
 
     def __init__(self, config):
         self.config = config
@@ -125,17 +129,18 @@ class QueueManager:
         self.lock = asyncio.Lock()
 
     async def get_queue(self, model_alias: str) -> ModelRequestQueue:
-        """Get or create queue untuk model."""
+        """Get or create queue for model."""
         async with self.lock:
             if model_alias not in self.queues:
+                max_size = self.config.system.max_queue_size_per_model
                 self.queues[model_alias] = ModelRequestQueue(
                     model_alias=model_alias,
-                    max_queue_size=100  # Bisa di-config
+                    max_queue_size=max_size
                 )
             return self.queues[model_alias]
 
     def get_all_stats(self) -> Dict[str, Dict[str, Any]]:
-        """Get stats untuk semua queues."""
+        """Get stats for all queues."""
         return {
             alias: queue.get_stats()
             for alias, queue in self.queues.items()

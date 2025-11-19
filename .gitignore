@@ -226,3 +226,6 @@ logs/
 # Markdowns
 *.mdx
 *.md
+
+# Custom JSON
+configOriginal.json

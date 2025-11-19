@@ -5,55 +5,40 @@
     },
     "system": {
         "idle_timeout_sec": 300,
-        "llama_server_path": "/home/jhs/llama.cpp/build/bin/llama-server"
+        "llama_server_path": "/app/llama-server",
+        "max_concurrent_models": 3,
+        "request_timeout_sec": 300,
+        "preload_models": [],
+        "keep_warm_models": 2,
+        "gpu_devices": [
+            0
+        ],
+        "parallel_requests": 4,
+        "cpu_threads": 8,
+        "use_mmap": true,
+        "flash_attention": "on",
+        "max_queue_size_per_model": 100,
+        "queue_timeout_sec": 300
     },
     "models": {
         "qwen3-4b-chat": {
-            "model_path": "/home/jhs/llama.cpp/build/bin/Qwen3-4B-Instruct-2507-Q4_1.gguf",
+            "model_path": "/app/models/Qwen3-4B-Instruct-2507-Q4_1.gguf",
             "params": {
                 "n_gpu_layers": 99,
                 "n_ctx": 4096,
-                "embedding": false
+                "embedding": false,
+                "parallel_override": null,
+                "batch_override": null
             }
         },
-        "gemma3-1b-chat": {
-            "model_path": "/home/jhs/llama.cpp/build/bin/gemma-3-1b-it-Q4_1.gguf",
+        "qwen3-0_6b-embed": {
+            "model_path": "/app/models/Qwen3-Embedding-0.6B-f16.gguf",
             "params": {
                 "n_gpu_layers": 99,
                 "n_ctx": 4096,
-                "embedding": false
-            }
-        },
-        "llama3.2-3b-chat": {
-            "model_path": "/home/jhs/llama.cpp/build/bin/Llama-3.2-3B-Instruct-Q5_K_M.gguf",
-            "params": {
-                "n_gpu_layers": 99,
-                "n_ctx": 4096,
-                "embedding": false
-            }
-        },
-        "deepseek-qwen3-8b-chat": {
-            "model_path": "/home/jhs/llama.cpp/build/bin/DeepSeek-R1-0528-Qwen3-8B-Q4_K_M.gguf",
-            "params": {
-                "n_gpu_layers": 99,
-                "n_ctx": 4096,
-                "embedding": false
-            }
-        },
-        "qwen3-8b-chat": {
-            "model_path": "/home/jhs/llama.cpp/build/bin/Qwen3-8B-Q4_K_M.gguf",
-            "params": {
-                "n_gpu_layers": 99,
-                "n_ctx": 4096,
-                "embedding": false
-            }
-        },
-        "qwen3-0.6b-embed": {
-            "model_path": "/home/jhs/llama.cpp/build/bin/Qwen3-Embedding-0.6B-Q8_0.gguf",
-            "params": {
-                "n_gpu_layers": 99,
-                "n_ctx": 4096,
-                "embedding": true
+                "embedding": true,
+                "parallel_override": null,
+                "batch_override": null
             }
         }
     }

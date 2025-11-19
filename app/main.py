@@ -1,5 +1,4 @@
 import os
-import json
 import time
 import uuid
 import httpx
@@ -7,6 +6,7 @@ import pynvml
 import logging
 import asyncio
 import statistics
+from typing import Any, Dict
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -14,7 +14,6 @@ from fastapi import FastAPI, HTTPException, Request, Response, status
 
 from .core import health_monitor
 from .core.metrics import metrics
-from .core.queue import QueueManager
 from .core.config import load_config
 from .core.manager import ModelManager
 from .core.warmup import ModelWarmupManager
@@ -22,6 +21,7 @@ from .core.logging_server import setup_logging
 from .core.health_monitor import HealthMonitor
 from .core.limit_request import RequestSizeLimitMiddleware
 from .core.telemetry import TelemetryCollector, RequestMetrics
+from .core.queue import QueueManager, QueuedRequest, RequestPriority, ModelRequestQueue
 
 # Get absolute path to config.json
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -64,6 +64,7 @@ except Exception as e:
 # Global variables yang akan di-init saat startup
 config = None
 manager = None
+queue = None
 warmup_manager = None
 queue_manager = None
 telemetry = None
@@ -81,18 +82,6 @@ async def app_startup():
         logger.info(f"Loading config from: {CONFIG_PATH}")
         config = load_config(CONFIG_PATH)
 
-        logger.info("Initializing ModelManager.")
-        manager = ModelManager(config, shutdown_event)
-
-        logger.info("Initializing WarmupManager.")
-        warmup_manager = ModelWarmupManager(manager, config, shutdown_event)
-
-        logger.info("Initializing QueueManager.")
-        queue_manager = QueueManager(config)
-
-        logger.info("Initializing TelemetryCollector.")
-        telemetry = TelemetryCollector()
-
         logger.info("Initializing HTTP client.")
         http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(
@@ -102,6 +91,18 @@ async def app_startup():
                 pool=5.0
             )
         )
+
+        logger.info("Initializing ModelManager.")
+        manager = ModelManager(config, shutdown_event)
+
+        logger.info("Initializing QueueManager.")
+        queue_manager = QueueManager(config)
+
+        logger.info("Initializing WarmupManager.")
+        warmup_manager = ModelWarmupManager(manager, config, shutdown_event)
+
+        logger.info("Initializing TelemetryCollector.")
+        telemetry = TelemetryCollector()
 
         logger.info("Initializing GPU monitoring.")
         pynvml.nvmlInit()
@@ -336,10 +337,262 @@ async def telemetry_middleware(request: Request, call_next):
         raise
 
 
-async def _proxy_request(request: Request, endpoint: str):
-    """Fungsi inti untuk meneruskan request ke runner yang tepat."""
+async def _process_queued_request(
+    queued_req_data: Dict[str, Any],
+    runner,
+    endpoint: str
+) -> Dict[str, Any]:
+    """Process single queued request."""
+    body = queued_req_data["body"]
+    request_id = queued_req_data["request_id"]
+
+    logger.debug(
+        f"[Queue] Processing request {request_id} for {queued_req_data['model_alias']}")
+
     try:
-        # Baca body request dari client
+        # Build request
+        internal_url = f"{runner.url}{endpoint}"
+        req = http_client.build_request(
+            method="POST",
+            url=internal_url,
+            json=body,
+            headers={"Content-Type": "application/json"}
+        )
+
+        # Send request
+        response_stream = await http_client.send(req, stream=True)
+
+        # Check if streaming
+        is_streaming = body.get("stream", False)
+
+        if is_streaming:
+            # For streaming, collect all chunks
+            chunks = []
+            async for chunk in response_stream.aiter_bytes():
+                chunks.append(chunk)
+            await response_stream.aclose()
+
+            # Return raw chunks for client streaming
+            return {
+                "type": "stream",
+                "chunks": chunks,
+                "status_code": response_stream.status_code
+            }
+        else:
+            # Non-streaming: read full response
+            content = await response_stream.aread()
+            await response_stream.aclose()
+
+            # Parse response
+            import json
+            response_data = json.loads(content.decode('utf-8'))
+
+            # Extract tokens
+            tokens = 0
+            if 'usage' in response_data:
+                tokens = response_data['usage'].get('completion_tokens', 0)
+            elif 'choices' in response_data and response_data['choices']:
+                content_text = response_data['choices'][0].get(
+                    'message', {}).get('content', '')
+                tokens = len(content_text) // 4
+
+            return {
+                "type": "json",
+                "data": response_data,
+                "tokens": tokens,
+                "status_code": response_stream.status_code
+            }
+
+    except Exception as e:
+        logger.exception(f"[Queue] Error processing request {request_id}: {e}")
+        raise
+
+
+async def _process_request_via_queue(
+    queue: ModelRequestQueue,
+    request_id: str,
+    model_alias: str,
+    body: Dict[str, Any],
+    priority: RequestPriority,
+    endpoint: str
+) -> Dict[str, Any]:
+    """
+    Process request via queue system.
+
+    This function:
+    1. Ensures runner is available
+    2. Enqueues request
+    3. Waits for queue processor to handle it
+    4. Returns result
+    """
+
+    # Ensure runner is started (cold start if needed)
+    runner = await manager.get_runner_for_request(model_alias)
+
+    # Create future for this request
+    response_future = asyncio.Future()
+
+    # Start queue processor if not running
+    if not queue.processing:
+        asyncio.create_task(_queue_processor(model_alias, queue, endpoint))
+
+    # Enqueue request
+    queued_req = QueuedRequest(
+        priority=priority.value,
+        timestamp=time.time(),
+        request_id=request_id,
+        model_alias=model_alias,
+        body=body,
+        response_future=response_future
+    )
+
+    async with queue.lock:
+        if len(queue.queue) >= queue.max_queue_size:
+            queue.total_rejected += 1
+            raise RuntimeError(
+                f"Queue for model '{model_alias}' is full ({queue.max_queue_size}). "
+                f"Try again later."
+            )
+
+        # Insert with priority
+        inserted = False
+        for i, existing_req in enumerate(queue.queue):
+            if queued_req.sort_key < existing_req.sort_key:
+                queue.queue.insert(i, queued_req)
+                inserted = True
+                break
+
+        if not inserted:
+            queue.queue.append(queued_req)
+
+        queue.total_requests += 1
+        queue.queue_not_empty.set()
+
+    # Wait for result with timeout
+    timeout = config.system.queue_timeout_sec
+    try:
+        result = await asyncio.wait_for(response_future, timeout=timeout)
+        return result
+    except asyncio.TimeoutError:
+        # Remove from queue if timeout
+        async with queue.lock:
+            try:
+                queue.queue.remove(queued_req)
+            except ValueError:
+                pass  # Already processed
+        raise TimeoutError(f"Request timeout after {timeout}s in queue")
+
+
+async def _queue_processor(model_alias: str, queue: ModelRequestQueue, endpoint: str):
+    """
+    Background task to process queue for a specific model.
+
+    This handles:
+    - Dequeuing requests in priority order
+    - Sending to llama-server
+    - Handling responses
+    - Error recovery
+    """
+    async with queue.lock:
+        if queue.processing:
+            return  # Already processing
+        queue.processing = True
+
+    logger.info(f"[Queue] Starting processor for model '{model_alias}'")
+
+    try:
+        while True:
+            # Dequeue next request
+            queued_req = await queue.dequeue()
+
+            if queued_req is None:
+                # Queue empty, wait for signal or timeout
+                try:
+                    await asyncio.wait_for(
+                        queue.queue_not_empty.wait(),
+                        timeout=30  # 30 seconds idle timeout
+                    )
+                    queue.queue_not_empty.clear()
+                    continue
+                except asyncio.TimeoutError:
+                    # No requests in 30s, stop processor
+                    logger.info(
+                        f"[Queue] Processor idle for {model_alias}, stopping")
+                    break
+
+            # Increment processing counter
+            async with queue.lock:
+                queue.current_processing += 1
+
+            # Process request
+            try:
+                logger.info(
+                    f"[Queue] Processing request {queued_req.request_id} "
+                    f"for {model_alias} (priority: {queued_req.priority})"
+                )
+
+                # Get runner
+                runner = await manager.get_runner_for_request(model_alias)
+
+                # Process the request
+                result = await _process_queued_request(
+                    {
+                        "body": queued_req.body,
+                        "request_id": queued_req.request_id,
+                        "model_alias": model_alias
+                    },
+                    runner,
+                    endpoint
+                )
+
+                # Set result to future
+                if not queued_req.response_future.done():
+                    queued_req.response_future.set_result(result)
+
+                async with queue.lock:
+                    queue.total_processed += 1
+
+                logger.debug(
+                    f"[Queue] Request {queued_req.request_id} completed successfully"
+                )
+
+            except Exception as e:
+                logger.exception(
+                    f"[Queue] Error processing request {queued_req.request_id}: {e}"
+                )
+
+                # Set exception to future
+                if not queued_req.response_future.done():
+                    queued_req.response_future.set_exception(e)
+
+            finally:
+                # Decrement processing counter
+                async with queue.lock:
+                    queue.current_processing -= 1
+
+    except asyncio.CancelledError:
+        logger.info(f"[Queue] Processor cancelled for {model_alias}")
+        raise
+    except Exception as e:
+        logger.exception(f"[Queue] Processor error for {model_alias}: {e}")
+    finally:
+        async with queue.lock:
+            queue.processing = False
+        logger.info(f"[Queue] Processor stopped for model '{model_alias}'")
+
+
+async def _proxy_request_with_queue(request: Request, endpoint: str):
+    """
+    Enhanced proxy with queue system.
+
+    Flow:
+    1. Parse request and validate
+    2. Add to queue dengan priority
+    3. Queue processor akan handle request
+    4. Return response (streaming atau json)
+    """
+    try:
+        # Parse body
         body = await request.json()
         model_alias = body.get("model")
 
@@ -349,121 +602,248 @@ async def _proxy_request(request: Request, endpoint: str):
                 detail="Field 'model' wajib ada di JSON body."
             )
 
-        # Validate model alias format (alphanumeric, dash, underscore only)
+        # Validate model alias
         if not model_alias.replace('-', '').replace('_', '').isalnum():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Model alias hanya boleh mengandung alphanumeric, dash, dan underscore."
             )
 
-        # Set model_alias ke request.state untuk telemetry
+        # Set model alias for telemetry
         request.state.model_alias = model_alias
 
-        # Check apakah stream diminta apa tidak.
+        # Check if streaming
         is_streaming = body.get("stream", False)
 
-        # Record request ke warmup manager
+        # Determine priority from header (optional)
+        priority_header = request.headers.get(
+            "X-Request-Priority", "normal").lower()
+        priority_map = {
+            "high": RequestPriority.HIGH,
+            "normal": RequestPriority.NORMAL,
+            "low": RequestPriority.LOW
+        }
+        priority = priority_map.get(priority_header, RequestPriority.NORMAL)
+
+        # Record request for warmup
         warmup_manager.record_request(model_alias)
 
-        # Menyiapkan runner untuk melakukan (Cold Start) atau (Warm Get) + (VRAM Check)
-        runner = await manager.get_runner_for_request(model_alias)
+        # Get queue for this model
+        queue = await queue_manager.get_queue(model_alias)
 
-        # Tentukan URL internal untuk diteruskan
-        internal_url = f"{runner.url}{endpoint}"
+        # Generate request ID
+        request_id = request.state.request_id  # From telemetry middleware
 
-        # Bangun request baru untuk dikirim ke llama-server
-        req = http_client.build_request(
-            method=request.method,
-            url=internal_url,
-            json=body,
-            headers={"Content-Type": "application/json"}
+        # Queue the request
+        queue_start_time = time.time()
+
+        logger.info(
+            f"[Queue] Enqueuing request {request_id} for {model_alias} "
+            f"(priority: {priority.name}, streaming: {is_streaming})"
         )
 
-        # Kirim request dan siapkan untuk streaming
-        response_stream = await http_client.send(req, stream=True)
-
-        if is_streaming:
-            tokens_count = 0  # Track tokens untuk streaming
-
-            # Streaming response
-            async def stream_generator():
-                """Generator untuk streaming dengan error handling."""
-                nonlocal tokens_count
-                try:
-                    async for chunk in response_stream.aiter_bytes():
-                        # Try to count tokens dari SSE chunks
-                        try:
-                            chunk_str = chunk.decode('utf-8')
-                            if 'data: ' in chunk_str and '"choices"' in chunk_str:
-                                # Extract JSON dari SSE format
-                                json_str = chunk_str.replace(
-                                    'data: ', '').strip()
-                                if json_str and json_str != '[DONE]':
-                                    chunk_data = json.loads(json_str)
-                                    # Count tokens (approximate)
-                                    if 'choices' in chunk_data and chunk_data['choices']:
-                                        delta = chunk_data['choices'][0].get(
-                                            'delta', {})
-                                        if 'content' in delta:
-                                            # Rough token estimation: ~1 token per 4 chars
-                                            tokens_count += len(
-                                                delta['content']) // 4
-                        except:
-                            pass  # Ignore parsing errors untuk streaming
-
-                        yield chunk
-                except httpx.RemoteProtocolError as e:
-                    logger.error(f"Stream interrupted for {model_alias}: {e}")
-                    error_chunk = f'data: {{"error": "Stream interrupted"}}\n\n'
-                    yield error_chunk.encode()
-                except Exception as e:
-                    logger.exception(f"Error dalam streaming: {e}")
-                    error_chunk = f'data: {{"error": "Internal error"}}\n\n'
-                    yield error_chunk.encode()
-                finally:
-                    await response_stream.aclose()
-                    # Set tokens_generated untuk telemetry
-                    request.state.tokens_generated = tokens_count
-
-            return StreamingResponse(
-                stream_generator(),
-                status_code=response_stream.status_code,
-                media_type=response_stream.headers.get(
-                    "content-type", "text/event-stream")
+        try:
+            # Process request through queue
+            result = await _process_request_via_queue(
+                queue=queue,
+                request_id=request_id,
+                model_alias=model_alias,
+                body=body,
+                priority=priority,
+                endpoint=endpoint
             )
+
+            # Record queue time
+            request.state.queue_time = time.time() - queue_start_time
+
+            # Handle response based on type
+            if result["type"] == "stream":
+                # Streaming response
+                async def stream_generator():
+                    try:
+                        for chunk in result["chunks"]:
+                            yield chunk
+                    except Exception as e:
+                        logger.error(f"Error in stream generator: {e}")
+                        error_chunk = f'data: {{"error": "Stream error"}}\n\n'
+                        yield error_chunk.encode()
+
+                return StreamingResponse(
+                    stream_generator(),
+                    status_code=result["status_code"],
+                    media_type="text/event-stream"
+                )
+            else:
+                # JSON response
+                request.state.tokens_generated = result.get("tokens", 0)
+
+                return JSONResponse(
+                    content=result["data"],
+                    status_code=result["status_code"]
+                )
+
+        except TimeoutError as e:
+            logger.error(f"[Queue] Request {request_id} timeout: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail=f"Request timeout in queue: {str(e)}"
+            )
+        except RuntimeError as e:
+            # Queue full
+            logger.warning(f"[Queue] Queue full for {model_alias}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(e)
+            )
+
+    except HTTPException:
+        raise
+    except LookupError as e:
+        logger.error(f"Model not found: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.exception("Unexpected error in proxy_request_with_queue")
+
+        if DEBUG_MODE:
+            detail = f"Internal Server Error: {str(e)}"
         else:
-            # Non-streaming response
-            content = await response_stream.aread()
-            await response_stream.aclose()
+            detail = "Internal server error occurred."
 
-            # Extract tokens dari response
-            try:
-                response_data = json.loads(content.decode('utf-8'))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=detail
+        )
 
-                # Extract token count dari usage field (OpenAI format)
-                if 'usage' in response_data:
-                    completion_tokens = response_data['usage'].get(
-                        'completion_tokens', 0)
-                    request.state.tokens_generated = completion_tokens
-                else:
-                    # Fallback: estimate dari content length
-                    if 'choices' in response_data and response_data['choices']:
-                        content_text = response_data['choices'][0].get(
-                            'message', {}).get('content', '')
-                        request.state.tokens_generated = len(
-                            content_text) // 4  # Rough estimate
-                    else:
-                        request.state.tokens_generated = 0
-            except Exception as e:
-                logger.debug(f"Failed to extract tokens: {e}")
-                request.state.tokens_generated = 0
 
-            return Response(
-                content=content,
-                status_code=response_stream.status_code,
-                media_type=response_stream.headers.get(
-                    "content-type", "application/json")
+async def _proxy_embeddings(request: Request):
+    """
+    Embeddings endpoint dengan format OpenAI-compatible.
+    """
+    try:
+        # Baca body request
+        body = await request.json()
+        model_alias = body.get("model")
+
+        if not model_alias:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Field 'model' wajib ada di JSON body."
             )
+
+        # Validate model alias format
+        if not all(c.isalnum() or c in ('-', '_') for c in model_alias):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Model alias hanya boleh mengandung alphanumeric, dash, dan underscore."
+            )
+
+        # Set model_alias untuk telemetry
+        request.state.model_alias = model_alias
+
+        # Verify model supports embeddings
+        model_config = config.models.get(model_alias)
+        if not model_config:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Model '{model_alias}' tidak ditemukan di config."
+            )
+
+        if not model_config.params.embedding:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Model '{model_alias}' tidak mendukung embeddings. Set 'embedding: true' di config."
+            )
+
+        # Get input text(s)
+        input_data = body.get("input")
+        if not input_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Field 'input' wajib ada untuk embeddings."
+            )
+
+        # Normalize input to list
+        if isinstance(input_data, str):
+            inputs = [input_data]
+        elif isinstance(input_data, list):
+            inputs = input_data
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Field 'input' harus berupa string atau list of strings."
+            )
+
+        # Record request untuk warmup
+        warmup_manager.record_request(model_alias)
+
+        # Get runner
+        queue_start = time.time()
+        runner = await manager.get_runner_for_request(model_alias)
+
+        # Build request untuk llama-server embedding endpoint
+        internal_url = f"{runner.url}/embedding"
+
+        # Collect all embeddings
+        all_embeddings = []
+        total_tokens = 0
+
+        for idx, text in enumerate(inputs):
+            # llama-server expects { "content": "text" }
+            embed_body = {"content": text}
+
+            req = http_client.build_request(
+                method="POST",
+                url=internal_url,
+                json=embed_body,
+                headers={"Content-Type": "application/json"}
+            )
+
+            response = await http_client.send(req)
+
+            if response.status_code != 200:
+                error_detail = response.text
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Embedding request failed: {error_detail}"
+                )
+
+            result = response.json()
+
+            # llama-server returns list directly, not dict with "embedding" key
+            if isinstance(result, list):
+                embedding = result
+            elif isinstance(result, dict):
+                embedding = result.get("embedding", [])
+            else:
+                logger.error(
+                    f"Unexpected embedding response format: {type(result)}")
+                embedding = []
+
+            all_embeddings.append({
+                "object": "embedding",
+                "embedding": embedding,
+                "index": idx
+            })
+
+            # Estimate tokens (rough: ~1 token per 4 chars)
+            total_tokens += len(text) // 4
+
+        request.state.queue_time = time.time() - queue_start
+        request.state.tokens_generated = 0  # Embeddings don't generate tokens
+
+        # Return OpenAI-compatible format
+        return JSONResponse(content={
+            "object": "list",
+            "data": all_embeddings,
+            "model": model_alias,
+            "usage": {
+                "prompt_tokens": total_tokens,
+                "total_tokens": total_tokens
+            }
+        })
 
     except LookupError as e:
         logger.error(f"Model tidak ditemukan: {e}")
@@ -708,18 +1088,50 @@ def get_models():
 
 @app.get("/v1/queue/stats")
 async def get_queue_stats():
-    """Get statistics untuk semua model queues."""
+    """
+    Get detailed statistics for all model queues.
+
+    Returns:
+    - Queue length (current pending requests)
+    - Total requests processed
+    - Rejection count (queue full)
+    - Current processing count
+    - Processing status
+    """
+    stats = queue_manager.get_all_stats()
+
+    # Add summary
+    total_queued = sum(q["queue_length"] for q in stats.values())
+    total_processing = sum(q["current_processing"] for q in stats.values())
+    total_processed = sum(q["total_processed"] for q in stats.values())
+    total_rejected = sum(q["total_rejected"] for q in stats.values())
+
     return {
-        "queues": queue_manager.get_all_stats()
+        "summary": {
+            "total_queued": total_queued,
+            "total_processing": total_processing,
+            "total_processed": total_processed,
+            "total_rejected": total_rejected
+        },
+        "per_model": stats
     }
 
 
 @app.post("/v1/chat/completions")
 async def proxy_chat_completions(request: Request):
     """
-    Chat completions dan mendukung streaming.
+    Chat completions dengan request queue system.
+
+    Supports:
+    - Priority queueing (via X-Request-Priority header: high/normal/low)
+    - Streaming and non-streaming responses
+    - Backpressure control
+    - Fair scheduling
+
+    Headers:
+    - X-Request-Priority: high|normal|low (optional, default: normal)
     """
-    return await _proxy_request(request, "/v1/chat/completions")
+    return await _proxy_request_with_queue(request, "/v1/chat/completions")
 
 
 @app.post("/v1/embeddings")
@@ -727,7 +1139,7 @@ async def proxy_embeddings(request: Request):
     """
     Embeddings.
     """
-    return await _proxy_request(request, "/v1/embeddings")
+    return await _proxy_embeddings(request)
 
 
 @app.post("/v1/models/eject")
@@ -767,3 +1179,59 @@ async def get_model_loading_status(model_alias: str):
         logger.exception(f"Gagal mendapatkan status untuk {model_alias}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Gagal mendapatkan status: {e}")
+
+
+@app.post("/v1/models/{model_alias}/reset")
+async def reset_model_failure(model_alias: str):
+    """
+    Reset failed model status to allow retry.
+
+    Useful when you've fixed configuration and want to retry.
+    """
+    try:
+        async with manager.lock:
+            if model_alias in manager.failed_models:
+                failed_info = manager.failed_models[model_alias]
+                del manager.failed_models[model_alias]
+
+                return {
+                    "status": "success",
+                    "model": model_alias,
+                    "message": f"Model failure status cleared. Had {failed_info['attempts']} failed attempts.",
+                    "previous_error": failed_info['error']
+                }
+            else:
+                return {
+                    "status": "not_found",
+                    "model": model_alias,
+                    "message": f"Model '{model_alias}' has no failure record."
+                }
+
+    except Exception as e:
+        logger.exception(f"Error resetting model {model_alias}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to reset model: {e}"
+        )
+
+
+@app.get("/v1/models/failed")
+async def get_failed_models():
+    """Get list of models that have failed to start."""
+    async with manager.lock:
+        if not manager.failed_models:
+            return {
+                "failed_models": [],
+                "message": "No failed models"
+            }
+
+        return {
+            "failed_models": [
+                {
+                    "model": alias,
+                    "attempts": info["attempts"],
+                    "error": info["error"][:200]
+                }
+                for alias, info in manager.failed_models.items()
+            ]
+        }

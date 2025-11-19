@@ -51,6 +51,44 @@ class SystemConfig(BaseModel):
         description="List of GPU device indices to use"
     )
 
+    parallel_requests: int = Field(
+        default=4,
+        ge=1,
+        le=32,
+        description="Jumlah parallel requests per model (llama.cpp --parallel)"
+    )
+
+    cpu_threads: int = Field(
+        default=8,
+        ge=1,
+        le=64,
+        description="Jumlah CPU threads untuk non-GPU ops (llama.cpp --threads)"
+    )
+
+    use_mmap: bool = Field(
+        default=True,
+        description="Gunakan memory mapping untuk loading model (faster tapi butuh stable VRAM)"
+    )
+
+    flash_attention: str = Field(
+        default="on",
+        description="Flash Attention mode: 'on', 'off', atau 'auto'"
+    )
+
+    max_queue_size_per_model: int = Field(
+        default=100,
+        ge=10,
+        le=1000,
+        description="Maksimum queue size per model"
+    )
+
+    queue_timeout_sec: int = Field(
+        default=300,
+        ge=30,
+        le=600,
+        description="Timeout untuk request di queue"
+    )
+
     @field_validator('llama_server_path')
     @classmethod
     def validate_llama_server_path(cls, v: str) -> str:
@@ -68,11 +106,25 @@ class SystemConfig(BaseModel):
 
 
 class ModelParams(BaseModel):
-    n_gpu_layers: int = Field(default=99, ge=-1)  # -1 untuk offload semua
-    n_ctx: int = Field(default=4096, ge=512, le=131072)  # Max 128k context
-    n_batch: int = Field(default=512, ge=128, le=2048)  # Max 2048
+    n_gpu_layers: int = Field(default=99, ge=-1)
+    n_ctx: int = Field(default=4096, ge=512, le=131072)
+    n_batch: int = Field(default=512, ge=128, le=2048)
     embedding: bool = False
     chat_template: Optional[str] = None
+
+    parallel_override: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=32,
+        description="Override parallel requests untuk model ini"
+    )
+
+    batch_override: Optional[int] = Field(
+        default=None,
+        ge=128,
+        le=4096,
+        description="Override batch size untuk model ini"
+    )
 
 
 class ModelConfig(BaseModel):

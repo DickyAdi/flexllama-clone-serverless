@@ -223,9 +223,7 @@ __marimo__/
 logs/
 *.log
 
-# Custom JSON
-configOriginal.json
-config.json
 # Project specific excludes
 config.json
+configOriginal.json
 .timetracker

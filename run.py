@@ -4,7 +4,7 @@ import signal
 import uvicorn
 from app.check_validate_config import validate_config_file
 
-CONFIG_PATH = "config.json"
+CONFIG_PATH = "configOriginal.json"
 
 
 class Server:

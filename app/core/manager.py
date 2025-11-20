@@ -62,7 +62,8 @@ class RunnerProcess:
             self.llama_server_path, "--model", self.config.model_path,
             "--host", "127.0.0.1", "--port", str(self.port),
             "--n-gpu-layers", str(params.n_gpu_layers),
-            "--ctx-size", str(params.n_ctx),
+            "--ctx-size", str(params.n_ctx), "--mlock",
+            "--rope-freq-base", str(params.rope_freq_base), "-nkvo"
         ]
 
         # Batch size (with per-model override)
@@ -91,11 +92,18 @@ class RunnerProcess:
         if params.chat_template:
             command.extend(["--chat-template", params.chat_template])
 
+        # Cache types (only add if not None and not empty string)
+        if params.type_k and params.type_k.lower() != "none":
+            command.extend(["--cache-type-k", params.type_k])
+
+        if params.type_v and params.type_v.lower() != "none":
+            command.extend(["--cache-type-v", params.type_v])
+
         logger.info(f"[{self.alias}] di Port {self.port}.")
         logger.debug(f"[{self.alias}] Command: {' '.join(command)}")
         logger.info(f"[{self.alias}] Log file: {self.log_file}")
         logger.info(
-            f"[{self.alias}] Performance: parallel={parallel}, threads={self.system_config.cpu_threads}, "
+            f"[{self.alias}] Performance: threads={self.system_config.cpu_threads}, "
             f"flash_attn={self.system_config.flash_attention}, mmap={self.system_config.use_mmap}"
         )
         self.startup_error = None
@@ -508,6 +516,32 @@ class ModelManager:
             for runner in self.active_runners.values():
                 await runner.stop()
         logger.info("Semua runner dimatikan.")
+
+    def _is_retriable_error(self, error_msg: str) -> bool:
+        """
+        Determine if an error is retriable or permanent.
+        Returns False for configuration errors that won't be fixed by retrying.
+        """
+        # Configuration errors that should not be retried
+        non_retriable_patterns = [
+            "Unsupported cache type",
+            "error while handling argument",
+            "Model file not found",
+            "Invalid model path",
+            "GGML_ASSERT",
+            "llama_model_load",
+            "unknown argument",
+            "invalid argument",
+            "failed to load model",
+        ]
+
+        error_lower = error_msg.lower()
+        for pattern in non_retriable_patterns:
+            if pattern.lower() in error_lower:
+                return False
+
+        # Other errors (timeouts, connection issues, etc.) are retriable
+        return True
 
     async def get_model_status(self, model_alias: str) -> Dict:
         async with self.lock:

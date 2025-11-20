@@ -25,7 +25,7 @@ from .core.queue import QueueManager, QueuedRequest, RequestPriority, ModelReque
 
 # Get absolute path to config.json
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.json")
+CONFIG_PATH = os.path.join(PROJECT_ROOT, "configOriginal.json")
 DEBUG_MODE = os.getenv("DEBUG", "false").lower() == "true"
 
 setup_logging(

@@ -107,8 +107,9 @@ class SystemConfig(BaseModel):
 
 class ModelParams(BaseModel):
     n_gpu_layers: int = Field(default=99, ge=-1)
-    n_ctx: int = Field(default=4096, ge=512, le=131072)
-    n_batch: int = Field(default=512, ge=128, le=2048)
+    n_ctx: int = Field(default=4096, ge=4096, le=8192)
+    n_batch: int = Field(default=8, ge=8, le=512)
+    rope_freq_base: int = Field(default=0, ge=20000, le=0)
     embedding: bool = False
     chat_template: Optional[str] = None
 
@@ -125,6 +126,29 @@ class ModelParams(BaseModel):
         le=4096,
         description="Override batch size untuk model ini"
     )
+
+    type_k: Optional[str] = Field(
+        default="f16",
+        description="Cache type untuk K (contoh: f16, q8_0, q4_0)"
+    )
+
+    type_v: Optional[str] = Field(
+        default="f16",
+        description="Cache type untuk V (contoh: f16, q8_0, q4_0)"
+    )
+
+    @field_validator('type_k', 'type_v')
+    @classmethod
+    def validate_cache_type(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return "f16"  # Default to f16 if not specified
+        valid_types = ['f16', 'f32', 'bf16', 'q8_0',
+                       'q4_0', 'q4_1', 'iq4_nl', 'q5_0', 'q5_1']
+        if v not in valid_types:
+            raise ValueError(
+                f"Cache type harus salah satu dari: {', '.join(valid_types)}"
+            )
+        return v
 
 
 class ModelConfig(BaseModel):

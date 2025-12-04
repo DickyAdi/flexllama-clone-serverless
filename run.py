@@ -418,7 +418,7 @@ if __name__ == "__main__":
         print(f"{e}")
         sys.exit(1)
     except json.JSONDecodeError as e:
-        print(f"FATAL: config.json tidak valid JSON: {e}")
+        print(f"{e}")
         sys.exit(1)
     except Exception as e:
         print(f"FATAL: Gagal menjalankan server: {e}")

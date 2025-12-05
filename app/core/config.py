@@ -15,9 +15,14 @@ class ApiConfig(BaseModel):
 
 
 class SystemConfig(BaseModel):
+    enable_idle_timeout: bool = Field(
+        default=True,
+        description="Enable/disable idle timeout. Set False untuk GPU kuat (model tetap loaded), True untuk GPU terbatas (eject model saat idle)."
+    )
+
     idle_timeout_sec: int = Field(
         default=300, ge=60, le=86400,  # Minimal 60 detik, maksimal 24 jam
-        description="Waktu idle sebelum 'Cold Sleep'."
+        description="Waktu idle sebelum 'Cold Sleep'. Hanya berlaku jika enable_idle_timeout=True."
     )
 
     llama_server_path: str = Field(
@@ -117,6 +122,20 @@ class SystemConfig(BaseModel):
         ge=30,
         le=600,
         description="Timeout untuk request di queue"
+    )
+
+    timeout_warmup_sec: int = Field(
+        default=180,
+        ge=120,
+        le=3600,
+        description="Digunakan untuk runner pada warmup di load_single_model"
+    )
+
+    wait_ready_sec: int = Field(
+        default=120,
+        ge=120,
+        le=3600,
+        description="Digunakan untuk menunggu status ready setelah mendapatkan runner"
     )
 
     @field_validator('llama_server_path')

@@ -536,6 +536,19 @@ async def _process_queued_request(
                 # Parse response
                 response_data = json.loads(content.decode('utf-8'))
 
+                # Detect context shift warning
+                context_shifted = False
+                if 'timings' in response_data:
+                    timings = response_data['timings']
+                    # llama.cpp mengirim context_shift di timings
+                    if 'context_shift' in timings and timings['context_shift'] > 0:
+                        context_shifted = True
+                        logger.warning(
+                            f"[{model_alias}] Context shift detected! "
+                            f"Shifted {timings['context_shift']} tokens. "
+                            f"Consider using shorter conversations or higher n_ctx."
+                        )
+
                 # Extract tokens
                 tokens = 0
                 if 'usage' in response_data:
@@ -544,6 +557,15 @@ async def _process_queued_request(
                     content_text = response_data['choices'][0].get(
                         'message', {}).get('content', '')
                     tokens = len(content_text) // 4
+
+                # Inject context shift warning ke response jika terjadi
+                if context_shifted:
+                    if 'choices' in response_data and response_data['choices']:
+                        # Tambah warning di metadata response
+                        if 'metadata' not in response_data:
+                            response_data['metadata'] = {}
+                        response_data['metadata']['context_shifted'] = True
+                        response_data['metadata']['warning'] = "Context window exceeded. Some earlier messages were shifted out. Consider using shorter conversations."
 
                 total_time = time.time() - start_time
                 logger.info(
@@ -555,7 +577,8 @@ async def _process_queued_request(
                     "type": "json",
                     "data": response_data,
                     "tokens": tokens,
-                    "status_code": response_stream.status_code
+                    "status_code": response_stream.status_code,
+                    "context_shifted": context_shifted
                 }
 
         except (httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError) as e:
@@ -651,6 +674,8 @@ async def _process_request_via_queue(
 
     # Start processor outside the lock to avoid deadlock
     if should_start_processor:
+        logger.info(
+            f"[Queue] Starting processor for {model_alias} (was stopped, auto-restarting)")
         asyncio.create_task(_queue_processor(model_alias, queue, endpoint))
 
     # Wait for result with timeout
@@ -707,10 +732,21 @@ async def _queue_processor(model_alias: str, queue: ModelRequestQueue, endpoint:
                     # Don't clear here - let the next iteration handle it
                     continue
                 except asyncio.TimeoutError:
-                    # No requests in idle_timeout, stop processor
-                    logger.info(
-                        f"[Queue] Processor idle for {model_alias}, stopping")
-                    break
+                    # Check if this is a warm model before stopping
+                    is_warm = warmup_manager.is_model_warm(model_alias)
+
+                    if is_warm:
+                        # Warm model - DON'T stop processor, keep running
+                        logger.debug(
+                            f"[Queue] Processor idle for {model_alias}, but it's a warm model. Keeping processor alive."
+                        )
+                        continue
+                    else:
+                        # Not warm - safe to stop
+                        logger.info(
+                            f"[Queue] Processor idle for {model_alias} (not warm), stopping"
+                        )
+                        break
 
             # Increment processing counter
             async with queue.lock:

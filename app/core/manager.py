@@ -92,6 +92,9 @@ class RunnerProcess:
         # Cache it
         self._gguf_cache[model_path] = (parallel, model_info)
 
+        # Store model_info untuk digunakan di command building
+        self.model_info = model_info
+
         # Log model info for debugging
         if model_info:
             swa_status = f"SWA={model_info.swa_window_size}" if model_info.is_swa else "non-SWA"
@@ -103,9 +106,18 @@ class RunnerProcess:
             self.llama_server_path, "--model", self.config.model_path,
             "--host", "127.0.0.1", "--port", str(self.port),
             "--n-gpu-layers", str(params.n_gpu_layers),
-            "--ctx-size", str(params.n_ctx), "--mlock",
-            "--context-shift"
+            "--ctx-size", str(params.n_ctx), "--mlock"
         ]
+
+        # Context shifting: DISABLE untuk non-SWA models, ENABLE untuk SWA models
+        # SWA models BUTUH context shifting untuk handle long conversations
+        if model_info and not model_info.is_swa:
+            command.append("--no-context-shift")
+            logger.info(
+                f"[{self.alias}] Non-SWA model detected. Context shifting DISABLED.")
+        else:
+            logger.info(
+                f"[{self.alias}] SWA model detected. Context shifting ENABLED for long conversations.")
 
         # RoPE frequency base (hanya jika di-set, biarkan default model jika None)
         if params.rope_freq_base is not None and params.rope_freq_base > 0:
@@ -422,6 +434,11 @@ class ModelManager:
     async def _idle_check_watchdog(self):
         timeout = self.config.system.idle_timeout_sec
         max_time = 300
+        timeout_enabled = self.config.system.enable_idle_timeout
+
+        if not timeout_enabled:
+            logger.info(
+                "[Idle Watchdog] Idle timeout DISABLED. Models akan tetap loaded di VRAM.")
 
         try:
             while not self.shutdown_event.is_set():
@@ -459,14 +476,17 @@ class ModelManager:
                                 runners_to_stop.append((alias, runner.port))
                             continue
 
-                        # Check idle timeout untuk model yang ready
+                        # Check idle timeout untuk model yang ready (hanya jika enabled)
                         if runner.status == "ready":
-                            idle_time = current_time - runner.last_used_time
-                            if idle_time > timeout:
-                                logger.info(
-                                    f"Model '{alias}' idle selama {idle_time:.0f}s (>{timeout}s). Stopping..."
-                                )
-                                runners_to_stop.append((alias, runner.port))
+                            if timeout_enabled:
+                                idle_time = current_time - runner.last_used_time
+                                if idle_time > timeout:
+                                    logger.info(
+                                        f"Model '{alias}' idle selama {idle_time:.0f}s (>{timeout}s). Stopping..."
+                                    )
+                                    runners_to_stop.append(
+                                        (alias, runner.port))
+                            # else: skip timeout check, model tetap loaded
 
                 # Stop runners di luar lock untuk menghindari deadlock
                 for alias, port in runners_to_stop:

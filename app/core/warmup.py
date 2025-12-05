@@ -4,6 +4,8 @@ import logging
 from typing import Dict, List, Set
 from collections import defaultdict
 
+from app.core import config
+
 logger = logging.getLogger(__name__)
 
 
@@ -89,11 +91,11 @@ class ModelWarmupManager:
             # Get runner
             runner = await asyncio.wait_for(
                 self.manager.get_runner_for_request(model_alias),
-                timeout=180.0  # 3 minutes timeout
+                timeout=self.config.system.timeout_warmup_sec
             )
 
             # Wait for ready status
-            max_wait_ready = 120
+            max_wait_ready = self.config.system.wait_ready_sec
             wait_start = time.time()
 
             while runner.status not in ["ready", "crashed", "stopped"]:
@@ -131,7 +133,7 @@ class ModelWarmupManager:
 
         except asyncio.TimeoutError:
             logger.error(
-                f"[Preload] [{index}/{total}] TIMEOUT | Model '{model_alias}' exceeded 180s")
+                f"[Preload] [{index}/{total}] TIMEOUT | Model '{model_alias}' exceeded {config.system.timeout_warmup_sec}s during loading")
             return False
         except Exception as e:
             logger.error(
@@ -410,7 +412,7 @@ class ModelWarmupManager:
                                             f"Successfully re-preloaded '{model_alias}'")
                                     except asyncio.TimeoutError:
                                         logger.error(
-                                            f"Timeout re-preloading '{model_alias}' (120s). Skipping for this cycle."
+                                            f"Timeout re-preloading '{model_alias}'. Skipping for this cycle."
                                         )
                                         # Don't retry immediately, wait for next cycle
                                         continue
@@ -433,7 +435,7 @@ class ModelWarmupManager:
                                             f"Successfully preloaded '{model_alias}'")
                                     except asyncio.TimeoutError:
                                         logger.error(
-                                            f"Timeout preloading '{model_alias}' (120s). Skipping for this cycle."
+                                            f"Timeout preloading '{model_alias}'. Skipping for this cycle."
                                         )
                                         continue
                                 else:
@@ -535,3 +537,17 @@ class ModelWarmupManager:
         time_since_last_request = time.time(
         ) - self.last_request_time[model_alias]
         return time_since_last_request < self.recent_activity_window
+
+    def is_model_warm(self, model_alias: str) -> bool:
+        """
+        Check apakah model termasuk dalam warm models yang harus tetap loaded.
+
+        Returns:
+            True jika model adalah warm model (top N popular), False otherwise
+        """
+        keep_warm_count = self.config.system.keep_warm_models
+        if keep_warm_count <= 0:
+            return False
+
+        popular_models = self.get_popular_models(top_n=keep_warm_count)
+        return model_alias in popular_models

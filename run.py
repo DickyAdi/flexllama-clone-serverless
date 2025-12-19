@@ -1,3 +1,4 @@
+import os
 import sys
 import json
 import signal
@@ -9,7 +10,8 @@ from pathlib import Path
 from datetime import datetime
 from app.check_validate_config import validate_config_file
 
-CONFIG_PATH = "configOriginal.json"
+# CONFIG_PATH bisa di-set via environment variable, default ke config.json
+CONFIG_PATH = os.getenv("CONFIG_PATH", "config.json")
 STATUS_SERVER_PORT = 8001
 
 

@@ -1,4 +1,11 @@
 {
+    "_README": "=== PANDUAN PATH CONFIGURATION ===",
+    "_README_1": "llama_server_path: Path lengkap ke binary llama-server",
+    "_README_2": "base_models_path: (OPSIONAL) Folder tempat model .gguf disimpan. Jika di-set, model_path bisa relatif.",
+    "_README_3": "model_path: Bisa ABSOLUTE (/full/path/to/model.gguf) atau RELATIVE (cuma nama_file.gguf)",
+    "_README_4": "Contoh 1 - Absolute: llama di /home/user/llama.cpp, models di /mnt/models → set base_models_path kosong, gunakan absolute path",
+    "_README_5": "Contoh 2 - Relative: semua models di satu folder → set base_models_path='/home/user/models', model_path='model.gguf'",
+
     "api": {
         "host": "<IP_ADDRESS>",
         "port": "<PORT>"
@@ -7,6 +14,7 @@
         "enable_idle_timeout": false,
         "idle_timeout_sec": 300,
         "llama_server_path": "<LLAMA_SERVER_PATH>",
+        "base_models_path": "<BASE_MODELS_PATH>",
         "max_concurrent_models": 10,
         "request_timeout_sec": 120,
         "preload_models": ["*"],
@@ -30,32 +38,32 @@
     },
     "models": {
         "<ALIAS_MODEL_1>": {
-            "model_path": "<MODEL_PATH_1>",
+            "model_path": "<MODEL_FILENAME>",
             "params": {
-                "n_gpu_layers": "<N_GPU_LAYERS>",
-                "n_ctx": "<N_CTX>",
+                "n_gpu_layers": 99,
+                "n_ctx": 4096,
                 "embedding": false,
                 "parallel_override": null,
                 "batch_override": null
             }
         },
         "<ALIAS_MODEL_2>": {
-            "model_path": "<MODEL_PATH_2>",
+            "model_path": "<MODEL_FILENAME>",
             "params": {
-                "n_gpu_layers": "<N_GPU_LAYERS>",
-                "n_ctx": "<N_CTX>",
+                "n_gpu_layers": 99,
+                "n_ctx": 16384,
                 "embedding": false,
                 "parallel_override": null,
                 "batch_override": null,
-                "type_k": "<TYPE_K>",
-                "type_v": "<TYPE_V>"
+                "type_k": "q4_0",
+                "type_v": "q4_0"
             }
         },
-        "<ALIAS_MODEL_EMBEDDING>": {
-            "model_path": "<MODEL_PATH_EMBEDDINGS>",
+        "<ALIAS_EMBEDDING>": {
+            "model_path": "<EMBEDDING_MODEL_FILENAME>",
             "params": {
-                "n_gpu_layers": "<N_GPU_LAYERS>",
-                "n_ctx": "<N_CTX>",
+                "n_gpu_layers": 99,
+                "n_ctx": 4096,
                 "embedding": true,
                 "parallel_override": null,
                 "batch_override": null

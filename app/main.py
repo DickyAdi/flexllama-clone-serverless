@@ -32,9 +32,10 @@ from .core.prometheus_metrics import (
 )
 
 
-# Get absolute path to config.json
+# CONFIG_PATH bisa di-set via environment variable, default ke config.json
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CONFIG_PATH = os.path.join(PROJECT_ROOT, "configOriginal.json")
+CONFIG_PATH = os.getenv(
+    "CONFIG_PATH", os.path.join(PROJECT_ROOT, "config.json"))
 DEBUG_MODE = os.getenv("DEBUG", "false").lower() == "true"
 
 setup_logging(

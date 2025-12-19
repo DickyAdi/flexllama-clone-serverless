@@ -68,7 +68,7 @@ class RunnerProcess:
         self.status = "starting"
 
         params = self.config.params
-        model_path = self.config.model_path
+        model_path = self.config.get_resolved_path()  # Use resolved path
 
         if model_path in self._gguf_cache:
             parallel, model_info = self._gguf_cache[model_path]
@@ -104,7 +104,7 @@ class RunnerProcess:
             )
 
         command = [
-            self.llama_server_path, "--model", self.config.model_path,
+            self.llama_server_path, "--model", self.config.get_resolved_path(),
             "--host", "127.0.0.1", "--port", str(self.port),
             "--n-gpu-layers", str(params.n_gpu_layers),
             "--ctx-size", str(params.n_ctx), "--mlock", "--jinja"
@@ -156,7 +156,8 @@ class RunnerProcess:
         if params.type_v and params.type_v.lower() != "none":
             command.extend(["--cache-type-v", params.type_v])
 
-        model_size_gb = Path(self.config.model_path).stat().st_size / (1024**3)
+        model_size_gb = Path(self.config.get_resolved_path()
+                             ).stat().st_size / (1024**3)
 
         if model_info and model_info.block_count > 20:
             logger.info(
@@ -570,7 +571,8 @@ class ModelManager:
             if runner is None:
                 # Get model file size for VRAM estimation
                 model_conf = self.config.models[model_alias]
-                model_path = Path(model_conf.model_path)
+                # Use resolved path
+                model_path = Path(model_conf.get_resolved_path())
                 model_size_mb = model_path.stat().st_size / (1024**2)
 
                 # Better VRAM estimation formula:

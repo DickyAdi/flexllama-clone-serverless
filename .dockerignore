@@ -1,0 +1,28 @@
+# Ignore config files - harus di-mount dari luar
+config.json
+configOriginal.json
+
+# Ignore models - harus di-mount dari luar
+models/
+
+# Ignore git dan cache
+.git/
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore virtual environment
+venv/
+.venv/
+
+# Ignore IDE files
+.vscode/
+.idea/
+
+# Ignore agent/workflow files
+.agent/
+
+# Ignore other unnecessary files
+*.log
+*.md
+.gitignore

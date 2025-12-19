@@ -26,16 +26,10 @@ RUN apt-get update && \
 COPY requirements.txt .
 RUN /venv/bin/pip install --no-cache-dir -r requirements.txt
 
-# Copy codebase kamu (app, config, dll.)
-COPY . .
-
-# Copy json config ke direktori yang sesuai
-COPY config.json .
-
-# Download models ke /app/models selama build (sequential biar nggak overload)
-RUN mkdir -p models
-RUN wget -P models https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_1.gguf
-RUN wget -P models https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/Qwen3-Embedding-0.6B-f16.gguf
+# Copy codebase (TANPA config.json dan models - di-mount dari luar)
+COPY *.py .
+COPY app/ app/
+COPY run.py .
 
 # Set ENV untuk llama-server path
 ENV LLAMA_SERVER_PATH=/app/llama-server

@@ -2,7 +2,7 @@ import os
 import json
 from pathlib import Path
 from typing import Dict, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ApiConfig(BaseModel):
@@ -27,7 +27,13 @@ class SystemConfig(BaseModel):
 
     llama_server_path: str = Field(
         default=os.getenv("LLAMA_SERVER_PATH", ""),
-        description="Path absolut ke binary llama-server."
+        description="Path absolut ke binary llama-server. Contoh: /home/user/llama.cpp/build/bin/llama-server"
+    )
+
+    base_models_path: str = Field(
+        default=os.getenv("BASE_MODELS_PATH", ""),
+        description="Path folder tempat models disimpan. model_path di config bisa relative terhadap folder ini, "
+                    "atau tetap absolute. Jika kosong, semua model_path harus absolute."
     )
 
     max_concurrent_models: int = Field(
@@ -173,6 +179,12 @@ class SystemConfig(BaseModel):
     @field_validator('llama_server_path')
     @classmethod
     def validate_llama_server_path(cls, v: str) -> str:
+        # ENV variable LLAMA_SERVER_PATH takes precedence over config value
+        # This is useful for Docker where the path is different from host
+        env_path = os.getenv("LLAMA_SERVER_PATH", "")
+        if env_path:
+            v = env_path  # Override with ENV value
+
         if not v:
             raise ValueError(
                 "llama_server_path harus diisi, atau set environment variable LLAMA_SERVER_PATH")
@@ -183,6 +195,24 @@ class SystemConfig(BaseModel):
             raise ValueError(f"llama_server_path bukan file: {v}")
         if not os.access(path, os.X_OK):
             raise ValueError(f"llama-server tidak executable: {v}")
+        return v
+
+    @field_validator('base_models_path')
+    @classmethod
+    def validate_base_models_path(cls, v: str) -> str:
+        # ENV variable BASE_MODELS_PATH takes precedence over config value
+        # This is useful for Docker where the path is different from host
+        env_path = os.getenv("BASE_MODELS_PATH", "")
+        if env_path:
+            v = env_path  # Override with ENV value
+
+        # base_models_path is optional - if empty, all model_path must be absolute
+        if v:
+            path = Path(v)
+            if not path.exists():
+                raise ValueError(f"base_models_path tidak ditemukan: {v}")
+            if not path.is_dir():
+                raise ValueError(f"base_models_path bukan directory: {v}")
         return v
 
 
@@ -237,20 +267,54 @@ class ModelParams(BaseModel):
 
 
 class ModelConfig(BaseModel):
-    model_path: str = Field(..., description="Path absolut ke file .gguf.")
+    model_path: str = Field(
+        ...,
+        description="Path ke file .gguf. Bisa ABSOLUTE (dimulai dengan /) atau "
+                    "RELATIVE terhadap base_models_path di system config."
+    )
     params: ModelParams = Field(default_factory=ModelParams)
 
-    @field_validator('model_path')
-    @classmethod
-    def validate_model_path(cls, v: str) -> str:
-        path = Path(v)
-        if not path.exists():
-            raise ValueError(f"Model file tidak ditemukan: {v}")
-        if not path.is_file():
-            raise ValueError(f"Model path bukan file: {v}")
-        if not v.endswith('.gguf'):
-            raise ValueError(f"Model file harus berformat .gguf: {v}")
-        return v
+    # Internal field to store resolved absolute path
+    _resolved_path: Optional[str] = None
+
+    def resolve_path(self, base_models_path: str) -> str:
+        """
+        Resolve model_path menjadi absolute path.
+        - Jika model_path sudah absolute, langsung digunakan.
+        - Jika relative, digabung dengan base_models_path.
+        """
+        path = Path(self.model_path)
+
+        if path.is_absolute():
+            resolved = path
+        else:
+            if not base_models_path:
+                raise ValueError(
+                    f"model_path '{self.model_path}' adalah relative path, "
+                    f"tapi base_models_path tidak di-set di system config. "
+                    f"Set base_models_path atau gunakan absolute path."
+                )
+            resolved = Path(base_models_path) / self.model_path
+
+        # Validate resolved path
+        if not resolved.exists():
+            raise ValueError(f"Model file tidak ditemukan: {resolved}")
+        if not resolved.is_file():
+            raise ValueError(f"Model path bukan file: {resolved}")
+        if not str(resolved).endswith('.gguf'):
+            raise ValueError(f"Model file harus berformat .gguf: {resolved}")
+
+        self._resolved_path = str(resolved)
+        return self._resolved_path
+
+    def get_resolved_path(self) -> str:
+        """Get the resolved absolute path. Must call resolve_path first."""
+        if self._resolved_path is None:
+            raise RuntimeError(
+                "resolve_path() belum dipanggil. Ini bug internal - "
+                "seharusnya dipanggil saat AppConfig di-load."
+            )
+        return self._resolved_path
 
 
 class AppConfig(BaseModel):
@@ -264,6 +328,22 @@ class AppConfig(BaseModel):
         if not v:
             raise ValueError("Minimal harus ada satu model terdefinisi")
         return v
+
+    @model_validator(mode='after')
+    def resolve_all_model_paths(self) -> 'AppConfig':
+        """
+        Resolve semua model_path ke absolute path setelah config di-load.
+        Ini memungkinkan model_path bisa relative terhadap base_models_path.
+        """
+        base_path = self.system.base_models_path
+
+        for model_alias, model_conf in self.models.items():
+            try:
+                model_conf.resolve_path(base_path)
+            except ValueError as e:
+                raise ValueError(f"Error pada model '{model_alias}': {e}")
+
+        return self
 
 
 def load_config(path: str) -> AppConfig:

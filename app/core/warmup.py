@@ -1,3 +1,51 @@
+"""
+Model Warmup and Pre-loading Module
+
+Modul ini menyediakan sistem pre-loading model saat startup dan keep-warm
+strategy untuk menjaga model populer tetap loaded di VRAM.
+
+Components:
+    - ModelWarmupManager: Manager untuk preloading dan warmup strategy
+
+Features:
+    - Preload models saat startup (configurable via preload_models)
+    - Keep-warm strategy untuk model populer berdasarkan usage statistics
+    - VRAM-aware loading (skip models jika VRAM tidak cukup)
+    - Popularity tracking berdasarkan request count
+    - Recent activity tracking untuk prevent idle preload
+
+Preload Modes:
+    - ["*"]: Load semua model yang ada di config
+    - ["model1", "model2"]: Load model spesifik
+    - []: Tidak preload apapun
+
+Warmup Strategy:
+    - Setiap 5 menit, check top N model populer (keep_warm_models)
+    - Jika model tidak running tapi recently active, preload
+    - Jika model running, update last_used_time untuk prevent idle timeout
+    - Skip models yang gagal load karena VRAM constraint
+
+Usage:
+    warmup_manager = ModelWarmupManager(manager, config, shutdown_event)
+    await warmup_manager.start()
+
+    # Record request untuk popularity tracking
+    warmup_manager.record_request("qwen3-8b")
+
+    # Check if model is warm
+    is_warm = warmup_manager.is_model_warm("qwen3-8b")
+
+    # Stop
+    await warmup_manager.stop()
+
+Configuration (via system config):
+    - preload_models: List models to preload
+    - preload_delay_sec: Delay between model loads
+    - keep_warm_models: Number of popular models to keep warm
+    - timeout_warmup_sec: Timeout for model loading
+    - wait_ready_sec: Max wait for model ready status
+"""
+
 import time
 import asyncio
 import logging
@@ -10,7 +58,14 @@ logger = logging.getLogger(__name__)
 
 
 class ModelWarmupManager:
-    """Manage model pre-loading dan keep-warm strategy."""
+    """
+    Manage model pre-loading dan keep-warm strategy.
+
+    Handles:
+    - Preload models saat startup
+    - Keep popular models warm (prevent idle timeout)
+    - Track model popularity berdasarkan request count
+    """
 
     def __init__(self, manager, config, shutdown_event):
         self.manager = manager

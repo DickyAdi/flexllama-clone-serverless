@@ -1,3 +1,49 @@
+"""
+Telemetry Collection Module
+
+Modul ini menyediakan sistem pengumpulan telemetry untuk tracking performa request
+dan menghasilkan summary statistics per model.
+
+Components:
+    - RequestMetrics: Dataclass untuk menyimpan metrics satu request
+    - TelemetryCollector: Collector dan aggregator untuk telemetry data
+
+Metrics yang di-track per request:
+    - request_id: ID unik untuk tracking
+    - model_alias: Model yang digunakan
+    - endpoint: Endpoint yang dipanggil
+    - start_time/end_time: Timestamp untuk duration calculation
+    - status_code: HTTP status code response
+    - error: Error message jika ada
+    - queue_time: Waktu tunggu di queue
+    - processing_time: Waktu processing oleh model
+    - tokens_generated: Jumlah token yang di-generate
+
+Summary Statistics:
+    - Total requests, success rate, error rate
+    - Response time stats (avg, min, max, p50, p95)
+    - Per-model breakdown dengan detail metrics
+
+Usage:
+    telemetry = TelemetryCollector(window_size=1000)
+    
+    # Record metrics
+    await telemetry.record_request(RequestMetrics(
+        request_id="req-123",
+        model_alias="qwen3-8b",
+        endpoint="/v1/chat/completions",
+        start_time=time.time(),
+        ...
+    ))
+    
+    # Get summary
+    summary = telemetry.get_summary()
+
+Note:
+    Window size menentukan berapa banyak request terakhir yang disimpan
+    untuk perhitungan statistics. Default 1000 requests.
+"""
+
 import asyncio
 import statistics
 from collections import deque

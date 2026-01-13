@@ -1,3 +1,45 @@
+"""
+Request Queue Management Module
+
+Modul ini menyediakan sistem antrian request dengan priority ordering dan backpressure
+untuk menangani request ke model LLM secara efisien.
+
+Components:
+    - RequestPriority: Enum untuk level prioritas request (HIGH, NORMAL, LOW)
+    - QueuedRequest: Dataclass untuk menyimpan request dalam antrian
+    - ModelRequestQueue: Queue per-model dengan priority heap dan backpressure
+    - QueueManager: Manager untuk semua queue, satu queue per model
+
+Features:
+    - Priority-based ordering: Request HIGH diproses duluan
+    - Backpressure: Queue memiliki max size untuk mencegah memory exhaustion
+    - Timeout handling: Request yang terlalu lama di queue akan timeout
+    - Heap-based: O(log n) insertion dan extraction
+
+Flow:
+    1. Request masuk via enqueue() dengan priority
+    2. Queue processor mengambil request via dequeue() (priority order)
+    3. Request diproses dan result dikembalikan via Future
+    4. Jika queue penuh, request ditolak dengan error
+
+Usage:
+    queue_manager = QueueManager(config)
+    queue = await queue_manager.get_queue("qwen3-8b")
+    
+    # Enqueue dengan priority
+    result = await queue.enqueue(
+        request_id="req-123",
+        body={"prompt": "..."},
+        priority=RequestPriority.HIGH,
+        timeout=300
+    )
+
+Priority Levels:
+    - HIGH (1): Request prioritas tinggi (VIP users, urgent tasks)
+    - NORMAL (2): Request normal (default)
+    - LOW (3): Request prioritas rendah (batch processing, background tasks)
+"""
+
 import time
 import heapq
 import asyncio

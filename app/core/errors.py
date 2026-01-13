@@ -1,9 +1,64 @@
+"""
+OpenAI-Compatible Error Handling Module
+
+Modul ini menyediakan error classes yang compatible dengan format error OpenAI API.
+Semua error mengikuti struktur response yang sama dengan OpenAI untuk memudahkan
+integrasi dengan client yang sudah ada.
+
+Format Error Response:
+    {
+        "error": {
+            "message": "Pesan error yang readable",
+            "type": "tipe_error",
+            "param": "parameter yang bermasalah (opsional)",
+            "code": "kode error spesifik (opsional)"
+        }
+    }
+
+Error Classes:
+    - OpenAIError: Base class untuk semua OpenAI-compatible errors
+    - InvalidRequestError (400): Request tidak valid atau parameter salah
+    - AuthenticationError (401): API key tidak valid atau missing
+    - NotFoundError (404): Model atau resource tidak ditemukan
+    - RateLimitError (429): Rate limit terlampaui
+    - ServerError (500): Internal server error
+    - ServiceUnavailableError (503): Service tidak tersedia (model loading, dll)
+    - InsufficientVRAMError: VRAM tidak cukup untuk load model
+    - QueueFullError: Request queue sudah penuh
+
+Usage:
+    from app.core.errors import NotFoundError, InsufficientVRAMError
+    
+    # Raise OpenAI-compatible error
+    raise NotFoundError(f"Model '{model_alias}' tidak ditemukan")
+    
+    # Raise VRAM error dengan detail
+    raise InsufficientVRAMError(
+        model_alias="qwen3-8b",
+        required_mb=8000,
+        available_mb=4000,
+        loaded_models=["gemma3-4b"]
+    )
+"""
+
 from typing import Optional
 from fastapi import HTTPException
 
 
 class OpenAIError(HTTPException):
-    """Base class untuk OpenAI-compatible errors."""
+    """
+    Base class untuk semua OpenAI-compatible HTTP errors.
+
+    Mengikuti format error response OpenAI API sehingga client yang sudah
+    terintegrasi dengan OpenAI dapat menghandle error dengan cara yang sama.
+
+    Attributes:
+        status_code: HTTP status code (400, 401, 404, 429, 500, 503)
+        message: Pesan error yang human-readable
+        error_type: Tipe error sesuai OpenAI format (e.g., "invalid_request_error")
+        param: Parameter yang menyebabkan error (opsional)
+        code: Kode error spesifik (opsional)
+    """
 
     def __init__(
         self,

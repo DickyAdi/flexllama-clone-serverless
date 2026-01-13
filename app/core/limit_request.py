@@ -1,3 +1,27 @@
+"""
+Request Size Limiting Middleware
+
+Modul ini menyediakan middleware untuk membatasi ukuran request body.
+Berguna untuk mencegah request yang terlalu besar yang bisa menyebabkan
+memory issues atau denial of service.
+
+Features:
+    - Limit berdasarkan Content-Length header
+    - Hanya berlaku untuk POST, PUT, PATCH methods
+    - Configurable max size (default 10MB)
+    - Return HTTP 413 jika request terlalu besar
+
+Usage:
+    from app.core.limit_request import RequestSizeLimitMiddleware
+    
+    # Di FastAPI app
+    app.add_middleware(RequestSizeLimitMiddleware, max_size=10 * 1024 * 1024)
+
+Note:
+    Default limit 10MB cukup untuk kebanyakan LLM requests. Untuk use case
+    dengan input sangat panjang (e.g., document processing), bisa dinaikkan.
+"""
+
 from fastapi import HTTPException, Request, status
 from starlette.middleware.base import BaseHTTPMiddleware
 

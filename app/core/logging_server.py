@@ -1,3 +1,42 @@
+"""
+Structured Logging Configuration Module
+
+Modul ini menyediakan konfigurasi logging dengan format terstruktur (JSON)
+untuk memudahkan parsing dan analisis log.
+
+Features:
+    - Structured JSON format untuk machine-readable logs
+    - Human-readable format sebagai fallback
+    - Console dan file handlers
+    - Suppression untuk noisy libraries (httpx, httpcore)
+
+Log Fields (Structured Mode):
+    - timestamp: ISO format timestamp
+    - level: Log level (INFO, WARNING, ERROR, etc.)
+    - logger: Logger name
+    - message: Log message
+    - module: Python module name
+    - function: Function name
+    - line: Line number
+    - model_alias: (optional) Model yang terkait
+    - port: (optional) Port runner
+    - status: (optional) Status model
+    - exception: (optional) Exception traceback
+
+Log Files:
+    - logs/api-gateway.log: Main application logs
+    - logs/runners/<alias>_<port>.log: Per-runner logs
+
+Usage:
+    from app.core.logging_server import setup_logging
+    
+    # Setup dengan structured format
+    setup_logging(log_level=logging.INFO, use_structured=True)
+    
+    # Setup dengan simple format
+    setup_logging(log_level=logging.DEBUG, use_structured=False)
+"""
+
 import sys
 import json
 import logging

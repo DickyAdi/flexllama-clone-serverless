@@ -223,6 +223,10 @@ logs/
 # Bash
 *.sh
 
+# Refactors
+run_refactor.py
+app_refactor/
+
 # Exludes
 .timetracker
 config.json

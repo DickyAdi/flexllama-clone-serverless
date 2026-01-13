@@ -1,3 +1,55 @@
+"""
+Model Status Tracking Module
+
+Modul ini menyediakan sistem tracking status real-time untuk semua model
+dengan dukungan SSE (Server-Sent Events) untuk live updates ke frontend.
+
+Components:
+    - ModelStatus: Enum untuk status model (OFF, STARTING, LOADING, READY, dll)
+    - ModelStatusInfo: Dataclass dengan info lengkap status model
+    - ModelStatusTracker: Main tracker dengan SSE support dan file persistence
+
+Model Status Flow:
+    OFF -> STARTING -> LOADING -> READY/LOADED
+                    -> CRASHED (jika gagal)
+                    -> FAILED (jika config error)
+    READY -> STOPPING -> OFF
+
+Status Definitions:
+    - OFF: Model tidak aktif, tidak ada runner process
+    - STARTING: Subprocess llama-server sedang di-spawn
+    - LOADING: Model sedang di-load ke VRAM
+    - READY/LOADED: Model siap menerima request
+    - STANDBY: Model idle tapi masih di-memory (deprecated)
+    - STOPPING: Model sedang dihentikan
+    - CRASHED: Model crash unexpectedly
+    - FAILED: Model gagal start (configuration/VRAM error)
+
+Features:
+    - Real-time status tracking per model
+    - SSE broadcasting untuk live updates
+    - File persistence untuk access sebelum FastAPI ready
+    - VRAM usage tracking
+    - Timestamp tracking (started_at, last_used_at, updated_at)
+
+Usage:
+    tracker = init_status_tracker()
+    await tracker.initialize_from_config(["qwen3-8b", "gemma3-4b"])
+    
+    # Update status
+    await tracker.update_status("qwen3-8b", ModelStatus.LOADING)
+    await tracker.update_status("qwen3-8b", ModelStatus.READY, port=8085)
+    
+    # Get status
+    status = await tracker.get_status("qwen3-8b")
+    all_statuses = await tracker.get_full_status()
+    
+    # SSE subscription
+    queue = await tracker.subscribe()
+    # ... consume updates from queue ...
+    await tracker.unsubscribe(queue)
+"""
+
 import json
 import asyncio
 import logging

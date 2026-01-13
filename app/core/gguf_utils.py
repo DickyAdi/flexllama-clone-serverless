@@ -1,5 +1,50 @@
 """
 GGUF Metadata Parser untuk Model Info dan SWA Detection
+
+Modul ini menyediakan parser untuk membaca metadata dari file model GGUF
+tanpa memerlukan library gguf resmi. Digunakan untuk:
+- Mendeteksi apakah model menggunakan Sliding Window Attention (SWA)
+- Membaca informasi arsitektur model
+- Menentukan optimal parallel slots berdasarkan context window
+
+GGUF Format:
+    GGUF adalah format file model untuk llama.cpp yang menyimpan:
+    - Magic number: 'GGUF' (4 bytes)
+    - Version (uint32)
+    - Tensor count (uint64)
+    - Metadata KV count (uint64)
+    - Metadata key-value pairs
+    - Tensor data
+
+Components:
+    - GGUFModelInfo: Dataclass dengan info model terstruktur
+    - GGUFReader: Parser minimal untuk read GGUF header dan metadata
+    - detect_swa(): Quick check untuk SWA support
+    - get_model_info(): Get full model info
+    - get_optimal_parallel(): Calculate optimal parallel slots
+
+SWA (Sliding Window Attention):
+    Model dengan SWA (seperti Gemma, Mistral) menggunakan attention window
+    yang terbatas, bukan full attention. Ini mempengaruhi:
+    - Context handling: Model hanya "melihat" token dalam window
+    - Context shifting: Perlu diaktifkan untuk conversations panjang
+    - Parallel slots: Perlu konteks yang cukup per slot
+
+Usage:
+    # Quick SWA check
+    is_swa, window_size = detect_swa("/path/to/model.gguf")
+    
+    # Full model info
+    info = get_model_info("/path/to/model.gguf")
+    print(f"Architecture: {info.architecture}")
+    print(f"SWA: {info.is_swa}, Window: {info.swa_window_size}")
+    
+    # Optimal parallel calculation
+    parallel, reason = get_optimal_parallel(
+        model_path="/path/to/model.gguf",
+        n_ctx=8192,
+        default_parallel=4
+    )
 """
 
 import struct

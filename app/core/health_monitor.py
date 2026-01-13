@@ -1,3 +1,45 @@
+"""
+Model Health Monitoring Module
+
+Modul ini menyediakan sistem monitoring kesehatan untuk model yang sedang aktif.
+Health checks dilakukan secara periodik untuk mendeteksi model yang bermasalah
+dan melakukan auto-recovery jika diperlukan.
+
+Components:
+    - HealthCheckResult: Hasil dari satu health check
+    - ModelHealth: Tracking status kesehatan satu model
+    - HealthMonitor: Background monitor untuk semua active models
+
+Health Status:
+    - healthy: Model responding normally
+    - degraded: Model mulai bermasalah (2+ consecutive failures)
+    - down: Model tidak responding (5+ consecutive failures, akan di-restart)
+
+Features:
+    - Periodic health checks ke /health endpoint llama-server
+    - Response time tracking untuk performance monitoring
+    - Consecutive failure counting untuk status determination
+    - Auto-restart untuk model yang down
+    - History tracking untuk uptime calculation
+
+Monitoring Flow:
+    1. Monitor loop berjalan setiap check_interval_sec (default 30s)
+    2. Untuk setiap active model, kirim GET /health ke runner
+    3. Record hasil (is_healthy, response_time, error)
+    4. Update consecutive_failures counter
+    5. Jika model down (5+ failures), trigger restart
+
+Usage:
+    health_monitor = HealthMonitor(manager, check_interval_sec=30)
+    health_monitor.start()
+    
+    # Get health status semua models
+    health_status = health_monitor.get_all_health()
+    
+    # Stop monitoring
+    await health_monitor.stop()
+"""
+
 import time
 import httpx
 import asyncio

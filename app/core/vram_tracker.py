@@ -1,3 +1,56 @@
+"""
+GPU VRAM Tracking Module
+
+Modul ini menyediakan sistem tracking VRAM GPU yang akurat untuk mencegah
+Out of Memory (OOM) errors saat loading multiple models.
+
+Components:
+    - ModelVRAMSnapshot: Snapshot VRAM usage pada satu waktu
+    - ModelVRAMTracking: Tracking lengkap VRAM untuk satu model
+    - VRAMTracker: Main tracker dengan NVML integration
+
+Features:
+    - Real-time VRAM monitoring via NVIDIA NVML
+    - Per-model VRAM usage tracking (before/after load)
+    - Sequential loading dengan load_lock untuk prevent race conditions
+    - Automatic VRAM estimation untuk reject model jika tidak cukup
+    - Background monitoring dengan periodic snapshots
+    - Baseline tracking untuk system overhead
+
+Tracking Flow:
+    1. track_model_load_start(): Acquire load_lock, record VRAM before load
+    2. Model loading process (llama-server start)
+    3. track_model_load_complete(): Record VRAM after load, calculate delta, release lock
+    4. track_model_eject(): Remove tracking saat model di-unload
+
+VRAM Status:
+    - healthy: Free VRAM >= 2x min_required
+    - warning: Free VRAM >= min_required
+    - critical: Free VRAM < min_required
+
+Usage:
+    vram_tracker = VRAMTracker(gpu_device_index=0, min_vram_required=500)
+    vram_tracker.start_monitoring()
+    
+    # Check sebelum load model
+    can_load, available_mb, message = vram_tracker.can_load_model(
+        estimated_vram_mb=4000,
+        safety_buffer_mb=200
+    )
+    
+    if can_load:
+        await vram_tracker.track_model_load_start("qwen3-8b", port=8085)
+        # ... load model ...
+        await vram_tracker.track_model_load_complete("qwen3-8b")
+    
+    # Get report
+    report = vram_tracker.get_vram_report()
+
+Note:
+    Membutuhkan pynvml (NVIDIA Management Library) yang terinstall.
+    Hanya support NVIDIA GPUs.
+"""
+
 import pynvml
 import asyncio
 import logging

@@ -6,39 +6,79 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ApiConfig(BaseModel):
-    host: str = "0.0.0.0"
-    port: int = Field(default=8000, ge=1024, le=65535)  # Validasi port range
+    """Konfigurasi API server untuk router model."""
+
+    host: str = Field(
+        default="0.0.0.0",
+        description="IP address untuk binding API server. "
+                    "Gunakan '0.0.0.0' untuk menerima koneksi dari semua interface, "
+                    "atau '127.0.0.1' untuk localhost only."
+    )
+    port: int = Field(
+        default=8000,
+        ge=1024,
+        le=65535,
+        description="Port untuk API server. Range valid: 1024-65535. "
+                    "Pastikan port tidak digunakan oleh service lain."
+    )
     cors_origins: list[str] = Field(
         default=["http://localhost:3000"],
-        description="Daftar origin yang diizinkan untuk CORS"
+        description="Daftar origin yang diizinkan untuk CORS (Cross-Origin Resource Sharing). "
+                    "Tambahkan URL frontend/backend yang akan mengakses API ini. "
+                    "Contoh: ['http://localhost:3000', 'https://myapp.com']"
     )
 
 
 class SystemConfig(BaseModel):
+    """
+    Konfigurasi sistem untuk router model.
+
+    Mengatur behavior llama-server, VRAM management, queue system,
+    dan parameter performa lainnya.
+    """
+
     enable_idle_timeout: bool = Field(
         default=True,
-        description="Enable/disable idle timeout. Set False untuk GPU kuat (model tetap loaded), True untuk GPU terbatas (eject model saat idle)."
+        description="Enable/disable auto-unload model saat idle. "
+                    "• True: Model akan di-unload dari VRAM setelah idle_timeout_sec (hemat VRAM, cocok untuk GPU terbatas). "
+                    "• False: Model tetap loaded di VRAM selamanya (response cepat, cocok untuk GPU besar atau production)."
     )
 
     idle_timeout_sec: int = Field(
-        default=300, ge=60, le=86400,  # Minimal 60 detik, maksimal 24 jam
-        description="Waktu idle sebelum 'Cold Sleep'. Hanya berlaku jika enable_idle_timeout=True."
+        default=300,
+        ge=60,
+        le=86400,
+        description="Waktu idle (detik) sebelum model di-unload dari VRAM. "
+                    "Hanya berlaku jika enable_idle_timeout=True. "
+                    "• 60-300: Untuk development/testing. "
+                    "• 300-900: Untuk production dengan traffic sedang. "
+                    "• 900+: Untuk traffic rendah, hemat resource."
     )
 
     llama_server_path: str = Field(
         default=os.getenv("LLAMA_SERVER_PATH", ""),
-        description="Path absolut ke binary llama-server. Contoh: /home/user/llama.cpp/build/bin/llama-server"
+        description="Path absolut ke binary llama-server dari llama.cpp. "
+                    "Bisa di-override dengan environment variable LLAMA_SERVER_PATH. "
+                    "Contoh: /home/user/llama.cpp/build/bin/llama-server"
     )
 
     base_models_path: str = Field(
         default=os.getenv("BASE_MODELS_PATH", ""),
-        description="Path folder tempat models disimpan. model_path di config bisa relative terhadap folder ini, "
-                    "atau tetap absolute. Jika kosong, semua model_path harus absolute."
+        description="Base directory untuk model files (.gguf). "
+                    "Jika di-set, model_path di setiap model bisa menggunakan relative path. "
+                    "Bisa di-override dengan environment variable BASE_MODELS_PATH. "
+                    "Jika kosong, semua model_path harus menggunakan absolute path."
     )
 
     max_concurrent_models: int = Field(
-        default=3, ge=1, le=10,
-        description="Maksimum model yang bisa running bersamaan."
+        default=3,
+        ge=1,
+        le=10,
+        description="Maksimum jumlah model yang bisa running bersamaan di VRAM. "
+                    "Sesuaikan dengan kapasitas VRAM GPU Anda. "
+                    "• 1-2: GPU 8-12GB. "
+                    "• 3-5: GPU 24GB. "
+                    "• 5+: Multi-GPU atau GPU 48GB+."
     )
 
     request_timeout_sec: int = Field(
@@ -65,49 +105,80 @@ class SystemConfig(BaseModel):
         default=500,
         ge=200,
         le=750,
-        description="Digunakan untuk membatasi ukuran VRAM pada GPU (dalam MB)"
+        description="Minimum VRAM (MB) yang harus tersedia sebelum loading model baru. "
+                    "Ini adalah safety buffer untuk mencegah OOM (Out of Memory). "
+                    "• 200-300: Untuk model kecil (<2GB). "
+                    "• 400-500: Untuk model medium (2-7GB). "
+                    "• 600-750: Untuk model besar (>7GB) atau multi-model setup."
     )
 
     vram_multiplier: float = Field(
         default=1.1,
         ge=1.0,
         le=3.0,
-        description="Multiplier untuk estimasi VRAM yang dibutuhkan saat load model"
+        description="Multiplier untuk estimasi VRAM yang dibutuhkan saat load model. "
+                    "Formula: estimated_vram = file_size * vram_multiplier + kv_cache + overhead. "
+                    "• 1.0-1.2: Model quantized (Q4, Q5). "
+                    "• 1.3-1.5: Model semi-quantized (Q8). "
+                    "• 1.5-2.0: Model FP16 atau context besar (>32K)."
     )
 
     keep_warm_models: int = Field(
         default=2,
         ge=0,
-        description="Jumlah model paling populer yang tetap warm"
+        description="Jumlah model yang tetap 'warm' (tidak di-unload meski idle). "
+                    "Model dipilih berdasarkan popularitas (frekuensi request). "
+                    "• 0: Semua model bisa di-unload. "
+                    "• 1-2: Model utama tetap loaded. "
+                    "• 3+: Untuk production dengan banyak model populer."
     )
 
     gpu_devices: list[int] = Field(
         default=[0],
-        description="List of GPU device indices to use"
+        description="Daftar GPU device index yang akan digunakan. "
+                    "Gunakan nvidia-smi untuk melihat GPU index. "
+                    "• [0]: Single GPU (default). "
+                    "• [0, 1]: Multi-GPU (untuk future support)."
     )
 
     parallel_requests: int = Field(
         default=4,
         ge=1,
         le=32,
-        description="Jumlah parallel requests per model (llama.cpp --parallel)"
+        description="Jumlah slot parallel request per model (llama.cpp --parallel). "
+                    "Mempengaruhi berapa request yang bisa diproses bersamaan oleh satu model. "
+                    "Trade-off: lebih tinggi = throughput lebih besar, tapi VRAM usage naik. "
+                    "• 1-2: Model besar (>13B) atau context besar (>32K). "
+                    "• 4-8: Model medium (7-13B). "
+                    "• 8-16: Model kecil (<7B) dengan context kecil."
     )
 
     cpu_threads: int = Field(
         default=8,
         ge=1,
         le=64,
-        description="Jumlah CPU threads untuk non-GPU ops (llama.cpp --threads)"
+        description="Jumlah CPU threads untuk operasi non-GPU (llama.cpp --threads). "
+                    "Biasanya untuk tokenization dan post-processing. "
+                    "Rekomendasi: setengah dari jumlah physical cores. "
+                    "• 4-8: CPU 8-16 cores. "
+                    "• 8-16: CPU 16-32 cores. "
+                    "• 16+: Server dengan banyak cores."
     )
 
     use_mmap: bool = Field(
         default=True,
-        description="Gunakan memory mapping untuk loading model (faster tapi butuh stable VRAM)"
+        description="Gunakan memory mapping untuk loading model file. "
+                    "• True (default): Loading lebih cepat, model di-share di RAM. "
+                    "• False: Loading lebih lambat, tapi lebih stabil untuk beberapa sistem. "
+                    "Set False jika mengalami crash saat loading model besar."
     )
 
     flash_attention: str = Field(
         default="on",
-        description="Flash Attention mode: 'on', 'off', atau 'auto'"
+        description="Flash Attention untuk efisiensi memory dan kecepatan. "
+                    "• 'on': Aktifkan FA (recommended untuk GPU modern). "
+                    "• 'off': Nonaktifkan FA (untuk GPU lama atau debugging). "
+                    "Catatan: Memerlukan GPU yang support FA (NVIDIA Ampere+, AMD RDNA3+)."
     )
 
     @property
@@ -217,39 +288,108 @@ class SystemConfig(BaseModel):
 
 
 class ModelParams(BaseModel):
-    n_gpu_layers: int = Field(default=99, ge=-1)
-    n_ctx: int = Field(default=4096, ge=512, le=131072)
-    n_batch: int = Field(default=256, ge=128, le=512)
+    """
+    Parameter spesifik per-model untuk llama-server.
+
+    Parameter ini akan di-pass ke llama-server saat model di-load.
+    Setiap model bisa memiliki konfigurasi berbeda sesuai kebutuhan.
+    """
+
+    n_gpu_layers: int = Field(
+        default=99,
+        ge=-1,
+        description="Jumlah layer model yang di-load ke GPU. "
+                    "• -1: Load semua layer ke GPU (full GPU offload). "
+                    "• 0: CPU only (tidak menggunakan GPU). "
+                    "• 99: Praktisnya sama dengan -1, load semua ke GPU. "
+                    "• N: Load N layer pertama ke GPU, sisanya di CPU (hybrid)."
+    )
+
+    n_ctx: int = Field(
+        default=4096,
+        ge=512,
+        le=131072,
+        description="Context window size (jumlah token yang bisa diproses sekaligus). "
+                    "Mempengaruhi VRAM usage secara signifikan. "
+                    "• 2048-4096: Chat singkat, hemat VRAM. "
+                    "• 8192-16384: Dokumen medium, RAG standard. "
+                    "• 32768+: Dokumen panjang, RAG dengan banyak context. "
+                    "Catatan: VRAM untuk KV cache ≈ n_ctx * 0.5MB (estimasi kasar)."
+    )
+
+    n_batch: int = Field(
+        default=256,
+        ge=128,
+        le=512,
+        description="Logical batch size untuk prompt processing. "
+                    "Mempengaruhi kecepatan processing prompt panjang. "
+                    "• 128-256: Untuk GPU dengan VRAM terbatas. "
+                    "• 256-512: Untuk GPU dengan VRAM cukup. "
+                    "Catatan: Nilai lebih tinggi = prompt processing lebih cepat."
+    )
+
     rope_freq_base: Optional[int] = Field(
         default=None,
         ge=0,
-        description="RoPE frequency base. None = gunakan default model"
+        description="RoPE (Rotary Position Embedding) frequency base. "
+                    "Untuk extended context length. "
+                    "• None (default): Gunakan nilai default dari model. "
+                    "• 10000: Default untuk kebanyakan model. "
+                    "• 500000+: Untuk model dengan context extension (YaRN, etc)."
     )
-    embedding: bool = False
-    chat_template: Optional[str] = None
+
+    embedding: bool = Field(
+        default=False,
+        description="Aktifkan mode embedding untuk model ini. "
+                    "• False: Model untuk text generation (chat, completion). "
+                    "• True: Model untuk menghasilkan embeddings (RAG, semantic search). "
+                    "Catatan: Gunakan model yang memang dirancang untuk embedding (BGE, Nomic, etc)."
+    )
+
+    chat_template: Optional[str] = Field(
+        default=None,
+        description="Override chat template untuk model ini. "
+                    "• None: Gunakan template default dari model (recommended). "
+                    "• 'chatml': Format ChatML. "
+                    "• 'llama2': Format Llama 2. "
+                    "• Custom Jinja template juga didukung."
+    )
 
     parallel_override: Optional[int] = Field(
         default=None,
         ge=1,
         le=32,
-        description="Override parallel requests untuk model ini"
+        description="Override system.parallel_requests untuk model ini. "
+                    "Berguna jika model tertentu butuh setting berbeda. "
+                    "• None: Gunakan nilai dari system.parallel_requests. "
+                    "• 1-2: Untuk model besar atau context panjang. "
+                    "• 4+: Untuk model kecil dengan throughput tinggi."
     )
 
     batch_override: Optional[int] = Field(
         default=None,
         ge=128,
         le=4096,
-        description="Override batch size untuk model ini"
+        description="Override n_batch untuk model ini (llama.cpp --batch-size). "
+                    "• None: Gunakan nilai n_batch default (256). "
+                    "• 512-1024: Untuk prompt processing lebih cepat. "
+                    "• 2048+: Untuk embedding models dengan input panjang."
     )
 
     type_k: Optional[str] = Field(
         default="f16",
-        description="Cache type untuk K (contoh: f16, q8_0, q4_0)"
+        description="Tipe data untuk KV cache key. Mempengaruhi VRAM dan akurasi. "
+                    "• 'f16' (default): Full precision, akurasi terbaik. "
+                    "• 'q8_0': 8-bit quantized, hemat ~50% VRAM. "
+                    "• 'q4_0': 4-bit quantized, hemat ~75% VRAM tapi akurasi turun. "
+                    "Valid: f16, f32, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1"
     )
 
     type_v: Optional[str] = Field(
         default="f16",
-        description="Cache type untuk V (contoh: f16, q8_0, q4_0)"
+        description="Tipe data untuk KV cache value. Sama seperti type_k. "
+                    "Biasanya type_k dan type_v di-set sama. "
+                    "Untuk context panjang (>32K), gunakan q4_0 atau q8_0 untuk hemat VRAM."
     )
 
     @field_validator('type_k', 'type_v')
@@ -267,12 +407,25 @@ class ModelParams(BaseModel):
 
 
 class ModelConfig(BaseModel):
+    """
+    Konfigurasi per-model.
+
+    Setiap model memiliki path file dan parameter spesifiknya sendiri.
+    Model di-identifikasi dengan alias (key di dict models).
+    """
+
     model_path: str = Field(
         ...,
-        description="Path ke file .gguf. Bisa ABSOLUTE (dimulai dengan /) atau "
-                    "RELATIVE terhadap base_models_path di system config."
+        description="Path ke file model .gguf. "
+                    "• Absolute path: '/home/user/models/model.gguf' "
+                    "• Relative path: 'model.gguf' (relatif terhadap base_models_path). "
+                    "File harus berformat GGUF dan accessible oleh server."
     )
-    params: ModelParams = Field(default_factory=ModelParams)
+    params: ModelParams = Field(
+        default_factory=ModelParams,
+        description="Parameter spesifik untuk model ini. "
+                    "Lihat ModelParams untuk detail setiap parameter."
+    )
 
     # Internal field to store resolved absolute path
     _resolved_path: Optional[str] = None

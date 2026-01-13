@@ -1,3 +1,62 @@
+"""
+Model Manager - llama-server Process Management
+
+Modul ini merupakan core dari router model yang mengelola lifecycle
+llama-server processes untuk setiap model.
+
+Components:
+    - RunnerProcess: Wrapper untuk subprocess llama-server
+    - ModelManager: Manager untuk semua active runners
+
+RunnerProcess Responsibilities:
+    - Start llama-server subprocess dengan konfigurasi yang sesuai
+    - Health check polling sampai model ready
+    - Graceful shutdown dengan escalating termination (SIGTERM -> SIGKILL)
+    - Logging ke file per-runner
+
+ModelManager Responsibilities:
+    - Port allocation dari pool (8085-8584)
+    - VRAM estimation dan tracking via VRAMTracker
+    - Concurrent model limiting
+    - Idle timeout watchdog (auto-unload model idle)
+    - Retry logic untuk failed loads
+
+llama-server Command Building:
+    Router otomatis membangun command llama-server dengan flags:
+    - --model: Path ke file GGUF
+    - --host/--port: Internal binding
+    - --n-gpu-layers, --ctx-size, --batch-size: Dari config
+    - --parallel, --threads: Dari system config
+    - -fa: Flash attention
+    - --embedding: Jika model embedding
+    - --no-context-shift: Untuk model non-SWA (auto-detect)
+    - --cache-type-k/v: KV cache quantization
+
+Request Flow:
+    1. Request masuk ke ModelManager.get_runner_for_request()
+    2. Check apakah model sudah running
+    3. Jika belum, estimate VRAM dan check availability
+    4. Start RunnerProcess dan wait for ready
+    5. Return runner URL untuk request forwarding
+
+VRAM Management:
+    - Sequential loading via load_lock (prevent race conditions)
+    - Pre-load VRAM estimation: file_size * multiplier + KV cache + overhead
+    - Post-load actual tracking (before/after delta)
+    - Reject load jika VRAM insufficient
+
+Usage:
+    manager = ModelManager(config, shutdown_event)
+    runner = await manager.get_runner_for_request("qwen3-8b")
+    # runner.url = "http://127.0.0.1:8085"
+    
+    # Stop specific model
+    await manager.eject_model("qwen3-8b")
+    
+    # Stop all
+    await manager.stop_all_runners()
+"""
+
 import gc
 import os
 import time

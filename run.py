@@ -4,14 +4,49 @@ import json
 import signal
 import asyncio
 import uvicorn
+import argparse
 import threading
 from aiohttp import web
 from pathlib import Path
 from datetime import datetime
 from app.check_validate_config import validate_config_file
 
-# CONFIG_PATH bisa di-set via environment variable, default ke config.json
-CONFIG_PATH = os.getenv("CONFIG_PATH", "config.json")
+
+def get_config_path() -> str:
+    """
+    Get config path with priority: CLI argument > ENV variable > default.
+
+    Usage:
+        python run.py --config configOriginal.json
+        python run.py -c /path/to/config.json
+        CONFIG_PATH=config.json python run.py
+        python run.py  # uses default config.json
+    """
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+        Examples:
+        python run.py --config configOriginal.json
+        python run.py -c /path/to/custom_config.json
+        CONFIG_PATH=myconfig.json python run.py
+        """
+    )
+    parser.add_argument(
+        '-c', '--config',
+        type=str,
+        default=None,
+        help='Path to config JSON file (default: config.json or $CONFIG_PATH env var)'
+    )
+
+    args = parser.parse_args()
+
+    # Priority: CLI arg > ENV var > default
+    if args.config:
+        return args.config
+    return os.getenv("CONFIG_PATH", "config.json")
+
+
+CONFIG_PATH = get_config_path()
 STATUS_SERVER_PORT = 8001
 
 

@@ -1213,6 +1213,13 @@ async def _proxy_embeddings(request: Request):
 
 
 # --- Endpoint API ---
+@app.get("/ping")
+def serverless_ping_check():
+    """For the sake of serverless to detect if the server is ready"""
+    return {'status': 'ok'}
+
+
+
 @app.get("/health")
 def health_check():
     """Mengecek apakah API Gateway hidup dan semua dependencies OK."""

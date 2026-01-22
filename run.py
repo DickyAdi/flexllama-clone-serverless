@@ -47,7 +47,9 @@ def get_config_path() -> str:
 
 
 CONFIG_PATH = get_config_path()
-STATUS_SERVER_PORT = 8001
+# STATUS_SERVER_PORT = 8001
+STATUS_SERVER_HOST = os.getenv('STATUS_SERVER_HOST', "0.0.0.0")
+STATUS_SERVER_PORT = os.getenv('STATUS_SERVER_PORT', 80)
 
 
 def init_status_file(config_data: dict):
@@ -321,6 +323,7 @@ def run_status_server_thread(host: str, port: int, stop_event: threading.Event):
         app = web.Application(middlewares=[cors_middleware])
         app.router.add_get('/status', get_status)
         app.router.add_get('/status/stream', sse_stream)
+        app.router.add_get('/ping', health_check)
 
         async def run_server():
             runner = web.AppRunner(app)
@@ -438,7 +441,7 @@ if __name__ == "__main__":
         stop_event = threading.Event()
         status_thread = threading.Thread(
             target=run_status_server_thread,
-            args=(API_HOST, STATUS_SERVER_PORT, stop_event),
+            args=(STATUS_SERVER_HOST, STATUS_SERVER_PORT, stop_event),
             daemon=True
         )
         status_thread.start()
@@ -449,7 +452,7 @@ if __name__ == "__main__":
 
         print(f"Starting API Gateway at http://{API_HOST}:{API_PORT}.")
         print(
-            f"Status server available at http://{API_HOST}:{STATUS_SERVER_PORT}")
+            f"Status server available at http://{STATUS_SERVER_HOST}:{STATUS_SERVER_PORT}")
 
         # Run server dengan proper signal handling
         server = Server("app.main:app", API_HOST, API_PORT)

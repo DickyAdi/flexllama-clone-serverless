@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import signal
+import time
 import asyncio
 import uvicorn
 import argparse
@@ -29,13 +30,14 @@ def get_config_path() -> str:
         python run.py --config configOriginal.json
         python run.py -c /path/to/custom_config.json
         CONFIG_PATH=myconfig.json python run.py
-        """
+        """,
     )
     parser.add_argument(
-        '-c', '--config',
+        "-c",
+        "--config",
         type=str,
         default=None,
-        help='Path to config JSON file (default: config.json or $CONFIG_PATH env var)'
+        help="Path to config JSON file (default: config.json or $CONFIG_PATH env var)",
     )
 
     args = parser.parse_args()
@@ -48,8 +50,11 @@ def get_config_path() -> str:
 
 CONFIG_PATH = get_config_path()
 # STATUS_SERVER_PORT = 8001
-STATUS_SERVER_HOST = os.getenv('STATUS_SERVER_HOST', "0.0.0.0")
-STATUS_SERVER_PORT = os.getenv('STATUS_SERVER_PORT', 80)
+STATUS_SERVER_HOST = os.getenv("STATUS_SERVER_HOST", "0.0.0.0")
+STATUS_SERVER_PORT = os.getenv("STATUS_SERVER_PORT", 80)
+STATUS_PING_COUNT = 0
+LATEST_PING = time.time()
+FASTAPI_PORT_OPEN = False
 
 
 def init_status_file(config_data: dict):
@@ -71,7 +76,7 @@ def init_status_file(config_data: dict):
         "server": {
             "status": "starting",
             "started_at": None,
-            "updated_at": datetime.now().isoformat()
+            "updated_at": datetime.now().isoformat(),
         },
         "models": {
             alias: {
@@ -83,14 +88,14 @@ def init_status_file(config_data: dict):
                 "load_progress": None,
                 "error_message": None,
                 "vram_used_mb": None,
-                "updated_at": datetime.now().isoformat()
+                "updated_at": datetime.now().isoformat(),
             }
             for alias in model_aliases
-        }
+        },
     }
 
     # Write to file
-    with open(status_file, 'w') as f:
+    with open(status_file, "w") as f:
         json.dump(status_data, f, indent=2)
 
     print(f"Status file initialized: {status_file}")
@@ -113,41 +118,61 @@ def run_status_server_thread(host: str, port: int, stop_event: threading.Event):
             """Get current status from file."""
             try:
                 if status_file.exists():
-                    with open(status_file, 'r') as f:
+                    with open(status_file, "r") as f:
                         data = json.load(f)
                     return web.json_response(data)
-                return web.json_response({
-                    "server": {"status": "starting"},
-                    "models": {},
-                    "message": "Status file not yet created"
-                })
+                return web.json_response(
+                    {
+                        "server": {"status": "starting"},
+                        "models": {},
+                        "message": "Status file not yet created",
+                    }
+                )
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=500)
 
         async def get_model_status(request):
             """Get status untuk satu model."""
-            model_alias = request.match_info.get('alias', '')
+            model_alias = request.match_info.get("alias", "")
             try:
                 if status_file.exists():
-                    with open(status_file, 'r') as f:
+                    with open(status_file, "r") as f:
                         data = json.load(f)
-                    models = data.get('models', {})
+                    models = data.get("models", {})
                     if model_alias in models:
                         return web.json_response(models[model_alias])
                 return web.json_response(
-                    {"error": f"Model '{model_alias}' not found"},
-                    status=404
+                    {"error": f"Model '{model_alias}' not found"}, status=404
                 )
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=500)
 
+        async def fastapi_port_check() -> bool:
+            try:
+                reader, writer = await asyncio.open_connection(
+                    host="127.0.0.1", port=8000
+                )
+                writer.close()
+                await writer.close()
+                return True
+            except:
+                return False
+
         async def health_check(request):
             """Simple health check."""
-            return web.json_response({
-                "status": "ok",
-                "service": "status-server",
-                "timestamp": datetime.now().isoformat()
-            })
+            global STATUS_PING_COUNT, FASTAPI_PORT_OPEN, LATEST_PING
+
+            current_time = time.time()
+            if not FASTAPI_PORT_OPEN:
+                FASTAPI_PORT_OPEN = await fastapi_port_check()
+                if not FASTAPI_PORT_OPEN and STATUS_PING_COUNT >= 5:
+                    return web.Response(status=503, text="FastAPI failed to load")
+
+                if not FASTAPI_PORT_OPEN and (current_time - LATEST_PING) >= 10:
+                    STATUS_PING_COUNT += 1
+                    LATEST_PING = current_time
+                    return web.Response(status=204, text="Still loading FastAPI server")
+            return web.Response(status=200, text="OK")
 
         async def sse_stream(request):
             """
@@ -161,11 +186,11 @@ def run_status_server_thread(host: str, port: int, stop_event: threading.Event):
             - heartbeat: Keep-alive setiap 30 detik
             """
             response = web.StreamResponse()
-            response.headers['Content-Type'] = 'text/event-stream'
-            response.headers['Cache-Control'] = 'no-cache'
-            response.headers['Connection'] = 'keep-alive'
-            response.headers['Access-Control-Allow-Origin'] = '*'
-            response.headers['X-Accel-Buffering'] = 'no'
+            response.headers["Content-Type"] = "text/event-stream"
+            response.headers["Cache-Control"] = "no-cache"
+            response.headers["Connection"] = "keep-alive"
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["X-Accel-Buffering"] = "no"
 
             await response.prepare(request)
 
@@ -178,13 +203,12 @@ def run_status_server_thread(host: str, port: int, stop_event: threading.Event):
             try:
                 # Send initial full status
                 if status_file.exists():
-                    with open(status_file, 'r') as f:
+                    with open(status_file, "r") as f:
                         initial_data = json.load(f)
 
                     # Kirim full status
                     await response.write(
-                        f"event: full_status\ndata: {json.dumps(initial_data)}\n\n".encode(
-                        )
+                        f"event: full_status\ndata: {json.dumps(initial_data)}\n\n".encode()
                     )
 
                     # Simpan state untuk tracking perubahan
@@ -199,7 +223,7 @@ def run_status_server_thread(host: str, port: int, stop_event: threading.Event):
                     # Check for file changes
                     if status_file.exists():
                         try:
-                            with open(status_file, 'r') as f:
+                            with open(status_file, "r") as f:
                                 current_data = json.load(f)
                         except (json.JSONDecodeError, IOError):
                             continue
@@ -212,13 +236,16 @@ def run_status_server_thread(host: str, port: int, stop_event: threading.Event):
                             server_event = {
                                 "server": current_server,
                                 "changed_fields": [
-                                    k for k in current_server
-                                    if last_server_status.get(k) != current_server.get(k)
-                                ] if last_server_status else ["all"]
+                                    k
+                                    for k in current_server
+                                    if last_server_status.get(k)
+                                    != current_server.get(k)
+                                ]
+                                if last_server_status
+                                else ["all"],
                             }
                             await response.write(
-                                f"event: server_update\ndata: {json.dumps(server_event)}\n\n".encode(
-                                )
+                                f"event: server_update\ndata: {json.dumps(server_event)}\n\n".encode()
                             )
                             last_server_status = current_server.copy()
                             last_heartbeat = current_time
@@ -232,7 +259,13 @@ def run_status_server_thread(host: str, port: int, stop_event: threading.Event):
                             if model_data != old_model_data:
                                 # Tentukan apa yang berubah
                                 changes = []
-                                for key in ["status", "port", "load_progress", "vram_used_mb", "error_message"]:
+                                for key in [
+                                    "status",
+                                    "port",
+                                    "load_progress",
+                                    "vram_used_mb",
+                                    "error_message",
+                                ]:
                                     if model_data.get(key) != old_model_data.get(key):
                                         changes.append(key)
 
@@ -240,7 +273,7 @@ def run_status_server_thread(host: str, port: int, stop_event: threading.Event):
                                     "alias": alias,
                                     "previous_status": old_model_data.get("status"),
                                     "current": model_data,
-                                    "changed_fields": changes
+                                    "changed_fields": changes,
                                 }
                                 changed_models.append(model_event)
 
@@ -249,30 +282,25 @@ def run_status_server_thread(host: str, port: int, stop_event: threading.Event):
                             if len(changed_models) == 1:
                                 # Single model update
                                 await response.write(
-                                    f"event: model_update\ndata: {json.dumps(changed_models[0])}\n\n".encode(
-                                    )
+                                    f"event: model_update\ndata: {json.dumps(changed_models[0])}\n\n".encode()
                                 )
                             else:
                                 # Multiple models update
                                 await response.write(
-                                    f"event: models_update\ndata: {json.dumps({'models': changed_models, 'count': len(changed_models)})}\n\n".encode(
-                                    )
+                                    f"event: models_update\ndata: {json.dumps({'models': changed_models, 'count': len(changed_models)})}\n\n".encode()
                                 )
 
-                            last_models_status = {k: v.copy()
-                                                  for k, v in current_models.items()}
+                            last_models_status = {
+                                k: v.copy() for k, v in current_models.items()
+                            }
                             last_heartbeat = current_time
 
                         # Check for removed models
                         for alias in list(last_models_status.keys()):
                             if alias not in current_models:
-                                remove_event = {
-                                    "alias": alias,
-                                    "event": "removed"
-                                }
+                                remove_event = {"alias": alias, "event": "removed"}
                                 await response.write(
-                                    f"event: model_removed\ndata: {json.dumps(remove_event)}\n\n".encode(
-                                    )
+                                    f"event: model_removed\ndata: {json.dumps(remove_event)}\n\n".encode()
                                 )
                                 del last_models_status[alias]
 
@@ -282,19 +310,21 @@ def run_status_server_thread(host: str, port: int, stop_event: threading.Event):
                         summary = {
                             "timestamp": datetime.now().isoformat(),
                             "type": "heartbeat",
-                            "server_status": last_server_status.get("status") if last_server_status else "unknown",
-                            "models_summary": {}
+                            "server_status": last_server_status.get("status")
+                            if last_server_status
+                            else "unknown",
+                            "models_summary": {},
                         }
 
                         # Count models by status
                         for alias, model in last_models_status.items():
                             status = model.get("status", "unknown")
-                            summary["models_summary"][status] = summary["models_summary"].get(
-                                status, 0) + 1
+                            summary["models_summary"][status] = (
+                                summary["models_summary"].get(status, 0) + 1
+                            )
 
                         await response.write(
-                            f"event: heartbeat\ndata: {json.dumps(summary)}\n\n".encode(
-                            )
+                            f"event: heartbeat\ndata: {json.dumps(summary)}\n\n".encode()
                         )
                         last_heartbeat = current_time
 
@@ -303,6 +333,7 @@ def run_status_server_thread(host: str, port: int, stop_event: threading.Event):
             except Exception as e:
                 print(f"SSE stream error: {e}")
                 import traceback
+
                 traceback.print_exc()
 
             return response
@@ -310,20 +341,21 @@ def run_status_server_thread(host: str, port: int, stop_event: threading.Event):
         # Create app dengan CORS
         async def cors_middleware(app, handler):
             async def middleware_handler(request):
-                if request.method == 'OPTIONS':
+                if request.method == "OPTIONS":
                     response = web.Response()
                 else:
                     response = await handler(request)
-                response.headers['Access-Control-Allow-Origin'] = '*'
-                response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-                response.headers['Access-Control-Allow-Headers'] = '*'
+                response.headers["Access-Control-Allow-Origin"] = "*"
+                response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+                response.headers["Access-Control-Allow-Headers"] = "*"
                 return response
+
             return middleware_handler
 
         app = web.Application(middlewares=[cors_middleware])
-        app.router.add_get('/status', get_status)
-        app.router.add_get('/status/stream', sse_stream)
-        app.router.add_get('/ping', health_check)
+        app.router.add_get("/status", get_status)
+        app.router.add_get("/status/stream", sse_stream)
+        app.router.add_get("/ping", health_check)
 
         async def run_server():
             runner = web.AppRunner(app)
@@ -389,7 +421,7 @@ class Server:
             port=self.port,
             reload=False,
             workers=1,
-            log_level="info"
+            log_level="info",
         )
 
         # Create server
@@ -415,7 +447,7 @@ if __name__ == "__main__":
             print("\nFATAL: Config validation failed.")
             sys.exit(1)
 
-        with open(CONFIG_PATH, 'r') as f:
+        with open(CONFIG_PATH, "r") as f:
             config_data = json.load(f)
 
         # Validasi struktur
@@ -442,17 +474,19 @@ if __name__ == "__main__":
         status_thread = threading.Thread(
             target=run_status_server_thread,
             args=(STATUS_SERVER_HOST, STATUS_SERVER_PORT, stop_event),
-            daemon=True
+            daemon=True,
         )
         status_thread.start()
 
         # Beri waktu status server untuk start
         import time
+
         time.sleep(0.5)
 
         print(f"Starting API Gateway at http://{API_HOST}:{API_PORT}.")
         print(
-            f"Status server available at http://{STATUS_SERVER_HOST}:{STATUS_SERVER_PORT}")
+            f"Status server available at http://{STATUS_SERVER_HOST}:{STATUS_SERVER_PORT}"
+        )
 
         # Run server dengan proper signal handling
         server = Server("app.main:app", API_HOST, API_PORT)
@@ -469,5 +503,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"FATAL: Gagal menjalankan server: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)

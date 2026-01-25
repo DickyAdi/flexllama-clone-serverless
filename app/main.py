@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi import FastAPI, HTTPException, Request, Response, status
+from fastapi import Header
 
 from .core import health_monitor
 from .core.metrics import metrics
@@ -28,19 +29,24 @@ from .core.telemetry import TelemetryCollector, RequestMetrics
 from .core.model_status import ModelStatus, init_status_tracker
 from .core.queue import QueueManager, QueuedRequest, RequestPriority, ModelRequestQueue
 from .core.prometheus_metrics import (
-    init_prometheus_collector, get_prometheus_collector, PrometheusMetricsCollector
+    init_prometheus_collector,
+    get_prometheus_collector,
+    PrometheusMetricsCollector,
 )
 
 
 # CONFIG_PATH bisa di-set via environment variable, default ke config.json
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CONFIG_PATH = os.getenv(
-    "CONFIG_PATH", os.path.join(PROJECT_ROOT, "config.json"))
+CONFIG_PATH = os.getenv("CONFIG_PATH", os.path.join(PROJECT_ROOT, "config.json"))
 DEBUG_MODE = os.getenv("DEBUG", "false").lower() == "true"
+
+inflight_request: Dict[str, asyncio.Event] = {}
+completed: Dict[str, dict] = {}
+
 
 setup_logging(
     log_level=logging.INFO,
-    use_structured=os.getenv("STRUCTURED_LOGS", "false").lower() == "true"
+    use_structured=os.getenv("STRUCTURED_LOGS", "false").lower() == "true",
 )
 
 logger = logging.getLogger(__name__)
@@ -87,7 +93,17 @@ prometheus_collector = None
 
 @app.on_event("startup")
 async def app_startup():
-    global config, manager, warmup_manager, queue_manager, telemetry, http_client, gpu_handle, health_monitor, status_tracker, prometheus_collector
+    global \
+        config, \
+        manager, \
+        warmup_manager, \
+        queue_manager, \
+        telemetry, \
+        http_client, \
+        gpu_handle, \
+        health_monitor, \
+        status_tracker, \
+        prometheus_collector
 
     try:
         logger.info("Initializing ModelStatusTracker.")
@@ -102,7 +118,7 @@ async def app_startup():
         limits = httpx.Limits(
             max_keepalive_connections=config.system.http_max_keepalive,
             max_connections=config.system.http_max_connections,
-            keepalive_expiry=60.0
+            keepalive_expiry=60.0,
         )
 
         http_client = httpx.AsyncClient(
@@ -110,10 +126,10 @@ async def app_startup():
                 connect=2.0,  # Reduced from 10s - local connections are fast
                 read=config.system.request_timeout_sec * 2,
                 write=5.0,  # Reduced from 10s
-                pool=5.0
+                pool=5.0,
             ),
             limits=limits,
-            http2=False  # HTTP/1.1 faster for local llama.cpp connections
+            http2=False,  # HTTP/1.1 faster for local llama.cpp connections
         )
 
         logger.info("Initializing ModelManager.")
@@ -131,8 +147,7 @@ async def app_startup():
         logger.info("Initializing GPU monitoring.")
         pynvml.nvmlInit()
         gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        logger.info(
-            f"Connected to GPU: {pynvml.nvmlDeviceGetName(gpu_handle)}")
+        logger.info(f"Connected to GPU: {pynvml.nvmlDeviceGetName(gpu_handle)}")
 
         logger.info("Initializing health monitor.")
         health_monitor = HealthMonitor(manager, check_interval_sec=30)
@@ -201,8 +216,7 @@ async def app_shutdown():
     start_time = time.time()
 
     while active_requests > 0 and (time.time() - start_time) < shutdown_timeout:
-        logger.info(
-            f"Waiting for {active_requests} active requests to complete.")
+        logger.info(f"Waiting for {active_requests} active requests to complete.")
         await asyncio.sleep(1)
 
     if active_requests > 0:
@@ -224,8 +238,7 @@ async def app_shutdown():
                     if runner.process:
                         try:
                             runner.process.kill()
-                            logger.warning(
-                                f"Force killed runner: {runner.alias}")
+                            logger.warning(f"Force killed runner: {runner.alias}")
                         except Exception as e:
                             logger.error(f"Error killing runner: {e}")
 
@@ -281,10 +294,7 @@ async def _sync_model_statuses():
             try:
                 # Wait dengan shutdown check
                 try:
-                    await asyncio.wait_for(
-                        shutdown_event.wait(),
-                        timeout=sync_interval
-                    )
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=sync_interval)
                     # Shutdown triggered
                     break
                 except asyncio.TimeoutError:
@@ -329,8 +339,10 @@ async def _sync_model_statuses():
                             alias=alias,
                             status=model_status,
                             port=runner.port if runner.is_alive() else None,
-                            error_message=runner.startup_error if runner_status == "crashed" else None,
-                            vram_used_mb=vram_mb
+                            error_message=runner.startup_error
+                            if runner_status == "crashed"
+                            else None,
+                            vram_used_mb=vram_mb,
                         )
 
                     # Update models yang tidak active ke OFF
@@ -341,16 +353,17 @@ async def _sync_model_statuses():
                             await status_tracker.update_status(
                                 alias=alias,
                                 status=ModelStatus.FAILED,
-                                error_message=failed_info.get(
-                                    "error", "Unknown error")
+                                error_message=failed_info.get("error", "Unknown error"),
                             )
                         else:
                             # Model tidak aktif
                             current_status = await status_tracker.get_status(alias)
-                            if current_status and current_status.status not in [ModelStatus.OFF, ModelStatus.FAILED]:
+                            if current_status and current_status.status not in [
+                                ModelStatus.OFF,
+                                ModelStatus.FAILED,
+                            ]:
                                 await status_tracker.update_status(
-                                    alias=alias,
-                                    status=ModelStatus.OFF
+                                    alias=alias, status=ModelStatus.OFF
                                 )
 
             except asyncio.CancelledError:
@@ -377,7 +390,7 @@ async def track_requests(request: Request, call_next):
     if shutdown_event.is_set():
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"detail": "Server is shutting down"}
+            content={"detail": "Server is shutting down"},
         )
 
     async with active_requests_lock:
@@ -413,8 +426,9 @@ async def metrics_middleware(request: Request, call_next):
 
         # Keep only last 1000 durations per endpoint
         if len(metrics["request_duration_seconds"][endpoint]) > 1000:
-            metrics["request_duration_seconds"][endpoint] = \
-                metrics["request_duration_seconds"][endpoint][-1000:]
+            metrics["request_duration_seconds"][endpoint] = metrics[
+                "request_duration_seconds"
+            ][endpoint][-1000:]
 
         return response
 
@@ -437,8 +451,13 @@ async def telemetry_middleware(request: Request, call_next):
 
     # Skip monitoring endpoints
     skip_endpoints = [
-        '/health', '/metrics', '/metrics/stream', '/metrics/report',
-        '/v1/telemetry/summary', '/vram', '/v1/health/models'
+        "/health",
+        "/metrics",
+        "/metrics/stream",
+        "/metrics/report",
+        "/v1/telemetry/summary",
+        "/vram",
+        "/v1/health/models",
     ]
 
     if request.url.path in skip_endpoints:
@@ -452,14 +471,14 @@ async def telemetry_middleware(request: Request, call_next):
         response = await call_next(request)
 
         # Get model_alias dengan fallback
-        model_alias = getattr(request.state, 'model_alias', None)
+        model_alias = getattr(request.state, "model_alias", None)
         if model_alias is None:
             model_alias = "unknown"
 
         end_time = time.time()
         duration = end_time - start_time
-        tokens = getattr(request.state, 'tokens_generated', 0)
-        queue_time = getattr(request.state, 'queue_time', 0.0)
+        tokens = getattr(request.state, "tokens_generated", 0)
+        queue_time = getattr(request.state, "queue_time", 0.0)
 
         # Determine status
         status = "success" if response.status_code < 400 else "error"
@@ -473,8 +492,8 @@ async def telemetry_middleware(request: Request, call_next):
             end_time=end_time,
             status_code=response.status_code,
             queue_time=queue_time,
-            processing_time=getattr(request.state, 'processing_time', 0.0),
-            tokens_generated=tokens
+            processing_time=getattr(request.state, "processing_time", 0.0),
+            tokens_generated=tokens,
         )
         await telemetry.record_request(metrics_data)
 
@@ -487,7 +506,7 @@ async def telemetry_middleware(request: Request, call_next):
                 status=status,
                 tokens=tokens,
                 queue_wait_seconds=queue_time,
-                status_code=response.status_code
+                status_code=response.status_code,
             )
 
         response.headers["X-Request-ID"] = request_id
@@ -495,7 +514,7 @@ async def telemetry_middleware(request: Request, call_next):
 
     except Exception as e:
         # Handle error cases
-        model_alias = getattr(request.state, 'model_alias', 'unknown')
+        model_alias = getattr(request.state, "model_alias", "unknown")
         end_time = time.time()
         duration = end_time - start_time
 
@@ -506,7 +525,7 @@ async def telemetry_middleware(request: Request, call_next):
             endpoint=request.url.path,
             start_time=start_time,
             end_time=end_time,
-            error=str(e)
+            error=str(e),
         )
         await telemetry.record_request(metrics_data)
 
@@ -519,16 +538,14 @@ async def telemetry_middleware(request: Request, call_next):
                 status="error",
                 tokens=0,
                 queue_wait_seconds=0,
-                status_code=500
+                status_code=500,
             )
 
         raise
 
 
 async def _process_queued_request(
-    queued_req_data: Dict[str, Any],
-    runner,
-    endpoint: str
+    queued_req_data: Dict[str, Any], runner, endpoint: str
 ) -> Dict[str, Any]:
     """Process single queued request with retry logic."""
     body = queued_req_data["body"]
@@ -539,8 +556,7 @@ async def _process_queued_request(
     max_retries = 2
     retry_delay = 1.0
 
-    logger.debug(
-        f"[Queue] Processing request {request_id} for {model_alias}")
+    logger.debug(f"[Queue] Processing request {request_id} for {model_alias}")
 
     for attempt in range(max_retries + 1):
         try:
@@ -550,7 +566,7 @@ async def _process_queued_request(
                 method="POST",
                 url=internal_url,
                 json=body,
-                headers={"Content-Type": "application/json"}
+                headers={"Content-Type": "application/json"},
             )
 
             build_time = time.time() - start_time
@@ -580,7 +596,7 @@ async def _process_queued_request(
                 return {
                     "type": "stream",
                     "chunks": chunks,
-                    "status_code": response_stream.status_code
+                    "status_code": response_stream.status_code,
                 }
             else:
                 # Non-streaming: read full response
@@ -590,14 +606,14 @@ async def _process_queued_request(
                 await response_stream.aclose()
 
                 # Parse response
-                response_data = json.loads(content.decode('utf-8'))
+                response_data = json.loads(content.decode("utf-8"))
 
                 # Detect context shift warning
                 context_shifted = False
-                if 'timings' in response_data:
-                    timings = response_data['timings']
+                if "timings" in response_data:
+                    timings = response_data["timings"]
                     # llama.cpp mengirim context_shift di timings
-                    if 'context_shift' in timings and timings['context_shift'] > 0:
+                    if "context_shift" in timings and timings["context_shift"] > 0:
                         context_shifted = True
                         logger.warning(
                             f"[{model_alias}] Context shift detected! "
@@ -607,21 +623,26 @@ async def _process_queued_request(
 
                 # Extract tokens
                 tokens = 0
-                if 'usage' in response_data:
-                    tokens = response_data['usage'].get('completion_tokens', 0)
-                elif 'choices' in response_data and response_data['choices']:
-                    content_text = response_data['choices'][0].get(
-                        'message', {}).get('content', '')
+                if "usage" in response_data:
+                    tokens = response_data["usage"].get("completion_tokens", 0)
+                elif "choices" in response_data and response_data["choices"]:
+                    content_text = (
+                        response_data["choices"][0]
+                        .get("message", {})
+                        .get("content", "")
+                    )
                     tokens = len(content_text) // 4
 
                 # Inject context shift warning ke response jika terjadi
                 if context_shifted:
-                    if 'choices' in response_data and response_data['choices']:
+                    if "choices" in response_data and response_data["choices"]:
                         # Tambah warning di metadata response
-                        if 'metadata' not in response_data:
-                            response_data['metadata'] = {}
-                        response_data['metadata']['context_shifted'] = True
-                        response_data['metadata']['warning'] = "Context window exceeded. Some earlier messages were shifted out. Consider using shorter conversations."
+                        if "metadata" not in response_data:
+                            response_data["metadata"] = {}
+                        response_data["metadata"]["context_shifted"] = True
+                        response_data["metadata"]["warning"] = (
+                            "Context window exceeded. Some earlier messages were shifted out. Consider using shorter conversations."
+                        )
 
                 total_time = time.time() - start_time
                 logger.info(
@@ -634,7 +655,7 @@ async def _process_queued_request(
                     "data": response_data,
                     "tokens": tokens,
                     "status_code": response_stream.status_code,
-                    "context_shifted": context_shifted
+                    "context_shifted": context_shifted,
                 }
 
         except (httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError) as e:
@@ -653,13 +674,11 @@ async def _process_queued_request(
                 )
                 raise
         except Exception as e:
-            logger.exception(
-                f"[Queue] Error processing request {request_id}: {e}")
+            logger.exception(f"[Queue] Error processing request {request_id}: {e}")
             raise
 
     # Should never reach here
-    raise RuntimeError(
-        f"Unexpected end of retry loop for request {request_id}")
+    raise RuntimeError(f"Unexpected end of retry loop for request {request_id}")
 
 
 async def _process_request_via_queue(
@@ -669,7 +688,8 @@ async def _process_request_via_queue(
     body: Dict[str, Any],
     priority: RequestPriority,
     endpoint: str,
-    timeout: Optional[float] = None
+    idempotency_key: Optional[str] = None,
+    timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Process request via queue system.
@@ -682,6 +702,16 @@ async def _process_request_via_queue(
     Note: Runner is obtained by the queue processor, not here,
     to avoid double runner acquisition.
     """
+    if not completed[idempotency_key]:
+        idempotency_key = uuid.uuid4()
+
+    if idempotency_key in completed:
+        return completed[idempotency_key]
+
+    if idempotency_key in inflight_request:
+        event = inflight_request[idempotency_key]
+        await event.wait()
+        return completed[idempotency_key]
 
     # Use provided timeout or default from config with multiplier
     if timeout is None:
@@ -699,7 +729,7 @@ async def _process_request_via_queue(
         request_id=request_id,
         model_alias=model_alias,
         body=body,
-        response_future=response_future
+        response_future=response_future,
     )
 
     async with queue.lock:
@@ -732,12 +762,17 @@ async def _process_request_via_queue(
     # Start processor outside the lock to avoid deadlock
     if should_start_processor:
         logger.info(
-            f"[Queue] Starting processor for {model_alias} (was stopped, auto-restarting)")
+            f"[Queue] Starting processor for {model_alias} (was stopped, auto-restarting)"
+        )
         asyncio.create_task(_queue_processor(model_alias, queue, endpoint))
 
+    event = asyncio.Event()
+    inflight_request[idempotency_key] = event
     # Wait for result with timeout
     try:
         result = await asyncio.wait_for(response_future, timeout=timeout)
+        completed[idempotency_key] = result
+        event.set()
         return result
     except asyncio.TimeoutError:
         wait_time = time.time() - enqueue_start
@@ -751,6 +786,15 @@ async def _process_request_via_queue(
             except ValueError:
                 pass  # Already processed
         raise TimeoutError(f"Request timeout after {timeout}s in queue")
+    finally:
+        inflight_request[idempotency_key] = None
+        asyncio.create_task(clean_completed_task(idempotency_key, 1800))
+
+
+async def clean_completed_task(key: str, delay: int) -> None:
+    await asyncio.sleep(delay)
+    completed.pop(key, None)
+    logger.info(f"Cleaning completed response for {key}")
 
 
 async def _queue_processor(model_alias: str, queue: ModelRequestQueue, endpoint: str):
@@ -783,8 +827,7 @@ async def _queue_processor(model_alias: str, queue: ModelRequestQueue, endpoint:
 
                 try:
                     await asyncio.wait_for(
-                        queue.queue_not_empty.wait(),
-                        timeout=idle_timeout
+                        queue.queue_not_empty.wait(), timeout=idle_timeout
                     )
                     # Don't clear here - let the next iteration handle it
                     continue
@@ -833,10 +876,10 @@ async def _queue_processor(model_alias: str, queue: ModelRequestQueue, endpoint:
                     {
                         "body": queued_req.body,
                         "request_id": queued_req.request_id,
-                        "model_alias": model_alias
+                        "model_alias": model_alias,
                     },
                     runner,
-                    endpoint
+                    endpoint,
                 )
                 request_time = time.time() - request_start
 
@@ -881,7 +924,9 @@ async def _queue_processor(model_alias: str, queue: ModelRequestQueue, endpoint:
         logger.info(f"[Queue] Processor stopped for model '{model_alias}'")
 
 
-async def _proxy_request_with_queue(request: Request, endpoint: str):
+async def _proxy_request_with_queue(
+    request: Request, endpoint: str, idempotency_key: Optional[str] = None
+):
     """
     Enhanced proxy with queue system.
 
@@ -899,7 +944,7 @@ async def _proxy_request_with_queue(request: Request, endpoint: str):
         if not model_alias:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Field 'model' wajib ada di JSON body."
+                detail="Field 'model' wajib ada di JSON body.",
             )
 
         # Set model alias for telemetry
@@ -909,12 +954,11 @@ async def _proxy_request_with_queue(request: Request, endpoint: str):
         is_streaming = body.get("stream", False)
 
         # Determine priority from header (optional)
-        priority_header = request.headers.get(
-            "X-Request-Priority", "normal").lower()
+        priority_header = request.headers.get("X-Request-Priority", "normal").lower()
         priority_map = {
             "high": RequestPriority.HIGH,
             "normal": RequestPriority.NORMAL,
-            "low": RequestPriority.LOW
+            "low": RequestPriority.LOW,
         }
         priority = priority_map.get(priority_header, RequestPriority.NORMAL)
 
@@ -947,7 +991,8 @@ async def _proxy_request_with_queue(request: Request, endpoint: str):
                 body=body,
                 priority=priority,
                 endpoint=endpoint,
-                timeout=queue_timeout
+                idempotency_key=idempotency_key,
+                timeout=queue_timeout,
             )
 
             # Record queue time
@@ -968,15 +1013,14 @@ async def _proxy_request_with_queue(request: Request, endpoint: str):
                 return StreamingResponse(
                     stream_generator(),
                     status_code=result["status_code"],
-                    media_type="text/event-stream"
+                    media_type="text/event-stream",
                 )
             else:
                 # JSON response
                 request.state.tokens_generated = result.get("tokens", 0)
 
                 return JSONResponse(
-                    content=result["data"],
-                    status_code=result["status_code"]
+                    content=result["data"], status_code=result["status_code"]
                 )
 
         except TimeoutError as e:
@@ -986,7 +1030,7 @@ async def _proxy_request_with_queue(request: Request, endpoint: str):
             )
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail=f"Request timeout in queue after {queue_wait_time:.1f}s: {str(e)}"
+                detail=f"Request timeout in queue after {queue_wait_time:.1f}s: {str(e)}",
             )
         except InsufficientVRAMError as e:
             # VRAM not enough to load model
@@ -1004,9 +1048,9 @@ async def _proxy_request_with_queue(request: Request, endpoint: str):
                         "model": e.model_alias,
                         "required_mb": round(e.required_mb),
                         "available_mb": round(e.available_mb),
-                        "loaded_models": e.loaded_models
+                        "loaded_models": e.loaded_models,
                     }
-                }
+                },
             )
         except RuntimeError as e:
             # Queue full or other runtime errors
@@ -1016,18 +1060,14 @@ async def _proxy_request_with_queue(request: Request, endpoint: str):
             else:
                 logger.warning(f"[Queue] Runtime error for {model_alias}: {e}")
             raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=str(e)
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)
             )
 
     except HTTPException:
         raise
     except LookupError as e:
         logger.error(f"Model not found: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
         logger.exception("Unexpected error in proxy_request_with_queue")
 
@@ -1037,8 +1077,7 @@ async def _proxy_request_with_queue(request: Request, endpoint: str):
             detail = "Internal server error occurred."
 
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=detail
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail
         )
 
 
@@ -1054,14 +1093,14 @@ async def _proxy_embeddings(request: Request):
         if not model_alias:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Field 'model' wajib ada di JSON body."
+                detail="Field 'model' wajib ada di JSON body.",
             )
 
         # Validate model alias format
-        if not all(c.isalnum() or c in ('-', '_') for c in model_alias):
+        if not all(c.isalnum() or c in ("-", "_") for c in model_alias):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Model alias hanya boleh mengandung alphanumeric, dash, dan underscore."
+                detail="Model alias hanya boleh mengandung alphanumeric, dash, dan underscore.",
             )
 
         # Set model_alias untuk telemetry
@@ -1072,13 +1111,13 @@ async def _proxy_embeddings(request: Request):
         if not model_config:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Model '{model_alias}' tidak ditemukan di config."
+                detail=f"Model '{model_alias}' tidak ditemukan di config.",
             )
 
         if not model_config.params.embedding:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Model '{model_alias}' tidak mendukung embeddings. Set 'embedding: true' di config."
+                detail=f"Model '{model_alias}' tidak mendukung embeddings. Set 'embedding: true' di config.",
             )
 
         # Get input text(s)
@@ -1086,7 +1125,7 @@ async def _proxy_embeddings(request: Request):
         if not input_data:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Field 'input' wajib ada untuk embeddings."
+                detail="Field 'input' wajib ada untuk embeddings.",
             )
 
         # Normalize input to list
@@ -1097,7 +1136,7 @@ async def _proxy_embeddings(request: Request):
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Field 'input' harus berupa string atau list of strings."
+                detail="Field 'input' harus berupa string atau list of strings.",
             )
 
         # Record request untuk warmup
@@ -1122,7 +1161,7 @@ async def _proxy_embeddings(request: Request):
                 method="POST",
                 url=internal_url,
                 json=embed_body,
-                headers={"Content-Type": "application/json"}
+                headers={"Content-Type": "application/json"},
             )
 
             response = await http_client.send(req)
@@ -1131,7 +1170,7 @@ async def _proxy_embeddings(request: Request):
                 error_detail = response.text
                 raise HTTPException(
                     status_code=response.status_code,
-                    detail=f"Embedding request failed: {error_detail}"
+                    detail=f"Embedding request failed: {error_detail}",
                 )
 
             result = response.json()
@@ -1142,15 +1181,12 @@ async def _proxy_embeddings(request: Request):
             elif isinstance(result, dict):
                 embedding = result.get("embedding", [])
             else:
-                logger.error(
-                    f"Unexpected embedding response format: {type(result)}")
+                logger.error(f"Unexpected embedding response format: {type(result)}")
                 embedding = []
 
-            all_embeddings.append({
-                "object": "embedding",
-                "embedding": embedding,
-                "index": idx
-            })
+            all_embeddings.append(
+                {"object": "embedding", "embedding": embedding, "index": idx}
+            )
 
             # Estimate tokens (rough: ~1 token per 4 chars)
             total_tokens += len(text) // 4
@@ -1159,43 +1195,38 @@ async def _proxy_embeddings(request: Request):
         request.state.tokens_generated = 0  # Embeddings don't generate tokens
 
         # Return OpenAI-compatible format
-        return JSONResponse(content={
-            "object": "list",
-            "data": all_embeddings,
-            "model": model_alias,
-            "usage": {
-                "prompt_tokens": total_tokens,
-                "total_tokens": total_tokens
+        return JSONResponse(
+            content={
+                "object": "list",
+                "data": all_embeddings,
+                "model": model_alias,
+                "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
             }
-        })
+        )
 
     except LookupError as e:
         logger.error(f"Model tidak ditemukan: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
     except httpx.ConnectError as e:
         logger.warning(f"Error koneksi untuk {model_alias}: {e}.")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Runner untuk '{model_alias}' tidak tersedia."
+            detail=f"Runner untuk '{model_alias}' tidak tersedia.",
         )
 
     except httpx.TimeoutException as e:
         logger.error(f"Timeout untuk {model_alias}: {e}")
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail=f"Request timeout untuk model '{model_alias}'"
+            detail=f"Request timeout untuk model '{model_alias}'",
         )
 
     except RuntimeError as e:
         # Untuk error seperti max concurrent models
         logger.error(f"Runtime error: {e}")
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(e)
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)
         )
 
     except Exception as e:
@@ -1207,8 +1238,7 @@ async def _proxy_embeddings(request: Request):
             detail = "Ada yang error."
 
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=detail
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail
         )
 
 
@@ -1216,47 +1246,38 @@ async def _proxy_embeddings(request: Request):
 @app.get("/ping")
 def serverless_ping_check():
     """For the sake of serverless to detect if the server is ready"""
-    return {'status': 'ok'}
-
+    return {"status": "ok"}
 
 
 @app.get("/health")
 def health_check():
     """Mengecek apakah API Gateway hidup dan semua dependencies OK."""
     try:
-        health_status = {
-            "status": "ok",
-            "checks": {}
-        }
+        health_status = {"status": "ok", "checks": {}}
 
         # Check GPU
         try:
             mem_info = pynvml.nvmlDeviceGetMemoryInfo(gpu_handle)
             health_status["checks"]["gpu"] = {
                 "status": "ok",
-                "vram_used_gb": f"{mem_info.used / (1024**3):.2f}"
+                "vram_used_gb": f"{mem_info.used / (1024**3):.2f}",
             }
         except Exception as e:
             health_status["status"] = "degraded"
-            health_status["checks"]["gpu"] = {
-                "status": "error",
-                "error": str(e)
-            }
+            health_status["checks"]["gpu"] = {"status": "error", "error": str(e)}
 
         # Check manager
         try:
-            active_count = len([r for r in manager.active_runners.values()
-                                if r.is_alive()])
+            active_count = len(
+                [r for r in manager.active_runners.values() if r.is_alive()]
+            )
             health_status["checks"]["manager"] = {
                 "status": "ok",
-                "active_models": active_count
+                "active_models": active_count,
             }
         except Exception as e:
             health_status["status"] = "degraded"
-            health_status["checks"]["manager"] = {
-                "status": "error",
-                "error": str(e)
-            }
+            health_status["checks"]["manager"] = {"status": "error", "error": str(e)}
 
         # Check http_client
         try:
@@ -1264,24 +1285,21 @@ def health_check():
                 health_status["status"] = "degraded"
                 health_status["checks"]["http_client"] = {
                     "status": "error",
-                    "error": "HTTP client is closed"
+                    "error": "HTTP client is closed",
                 }
             else:
-                health_status["checks"]["http_client"] = {
-                    "status": "ok"
-                }
+                health_status["checks"]["http_client"] = {"status": "ok"}
         except Exception as e:
             health_status["status"] = "degraded"
             health_status["checks"]["http_client"] = {
                 "status": "error",
-                "error": str(e)
+                "error": str(e),
             }
 
         # Jika ada component yang error, return 503
         if health_status["status"] == "degraded":
             raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=health_status
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=health_status
             )
 
         return health_status
@@ -1291,7 +1309,8 @@ def health_check():
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Health check gagal: {e}")
+            detail=f"Health check gagal: {e}",
+        )
 
 
 @app.get("/metrics/legacy")
@@ -1303,32 +1322,37 @@ async def get_metrics_legacy():
     for endpoint, count in metrics["requests_total"].items():
         output.append(f'requests_total{{endpoint="{endpoint}"}} {count}')
         output.append(
-            f'requests_success{{endpoint="{endpoint}"}} {metrics["requests_success"][endpoint]}')
+            f'requests_success{{endpoint="{endpoint}"}} {metrics["requests_success"][endpoint]}'
+        )
         output.append(
-            f'requests_failed{{endpoint="{endpoint}"}} {metrics["requests_failed"][endpoint]}')
+            f'requests_failed{{endpoint="{endpoint}"}} {metrics["requests_failed"][endpoint]}'
+        )
 
         # Duration statistics
         durations = metrics["request_duration_seconds"].get(endpoint, [])
         if durations:
             output.append(
-                f'request_duration_seconds_avg{{endpoint="{endpoint}"}} {statistics.mean(durations):.4f}')
+                f'request_duration_seconds_avg{{endpoint="{endpoint}"}} {statistics.mean(durations):.4f}'
+            )
             # quantiles requires at least 2 data points
             if len(durations) >= 2:
                 output.append(
-                    f'request_duration_seconds_p95{{endpoint="{endpoint}"}} {statistics.quantiles(durations, n=20)[18]:.4f}')
+                    f'request_duration_seconds_p95{{endpoint="{endpoint}"}} {statistics.quantiles(durations, n=20)[18]:.4f}'
+                )
 
     # Model metrics
-    output.append(f'models_loaded_total {metrics["models_loaded_total"]}')
-    output.append(f'models_ejected_total {metrics["models_ejected_total"]}')
+    output.append(f"models_loaded_total {metrics['models_loaded_total']}")
+    output.append(f"models_ejected_total {metrics['models_ejected_total']}")
     output.append(
-        f'models_active {len([r for r in manager.active_runners.values() if r.is_alive()])}')
+        f"models_active {len([r for r in manager.active_runners.values() if r.is_alive()])}"
+    )
 
     # VRAM metrics
     try:
         mem_info = pynvml.nvmlDeviceGetMemoryInfo(gpu_handle)
-        output.append(f'vram_total_bytes {mem_info.total}')
-        output.append(f'vram_used_bytes {mem_info.used}')
-        output.append(f'vram_free_bytes {mem_info.free}')
+        output.append(f"vram_total_bytes {mem_info.total}")
+        output.append(f"vram_used_bytes {mem_info.used}")
+        output.append(f"vram_free_bytes {mem_info.free}")
     except:
         pass
 
@@ -1349,6 +1373,7 @@ async def get_models_health():
 
 # --- Prometheus Metrics Endpoints ---
 
+
 @app.get("/metrics")
 async def get_prometheus_metrics():
     """
@@ -1366,14 +1391,11 @@ async def get_prometheus_metrics():
         return Response(
             content="# Prometheus collector not initialized\n",
             media_type="text/plain",
-            status_code=503
+            status_code=503,
         )
 
     content = collector.get_prometheus_metrics()
-    return Response(
-        content=content,
-        media_type=collector.get_content_type()
-    )
+    return Response(content=content, media_type=collector.get_content_type())
 
 
 @app.get("/metrics/stream")
@@ -1393,8 +1415,7 @@ async def stream_metrics(request: Request):
     collector = get_prometheus_collector()
     if not collector:
         return JSONResponse(
-            {"error": "Prometheus collector not initialized"},
-            status_code=503
+            {"error": "Prometheus collector not initialized"}, status_code=503
         )
 
     async def event_generator():
@@ -1410,27 +1431,25 @@ async def stream_metrics(request: Request):
 
                 # Check shutdown
                 if shutdown_event.is_set():
-                    yield f"event: shutdown\ndata: {{\"message\": \"Server shutting down\"}}\n\n"
+                    yield f'event: shutdown\ndata: {{"message": "Server shutting down"}}\n\n'
                     break
 
                 # Send metrics
                 try:
                     snapshot = await collector.get_realtime_snapshot(
-                        manager=manager,
-                        queue_manager=queue_manager
+                        manager=manager, queue_manager=queue_manager
                     )
                     yield f"event: metrics\ndata: {json.dumps(snapshot)}\n\n"
                 except Exception as e:
                     error_msg = str(e)
-                    logger.warning(
-                        f"Error generating metrics snapshot: {error_msg}")
+                    logger.warning(f"Error generating metrics snapshot: {error_msg}")
                     # Send error event so client knows what happened
-                    yield f"event: error\ndata: {{\"error\": \"{error_msg}\"}}\n\n"
+                    yield f'event: error\ndata: {{"error": "{error_msg}"}}\n\n'
 
                 # Send heartbeat if needed (only after 30 seconds)
                 current_time = time.time()
                 if current_time - last_heartbeat >= heartbeat_interval:
-                    yield f"event: heartbeat\ndata: {{\"timestamp\": \"{datetime.now().isoformat()}\"}}\n\n"
+                    yield f'event: heartbeat\ndata: {{"timestamp": "{datetime.now().isoformat()}"}}\n\n'
                     last_heartbeat = current_time
 
                 await asyncio.sleep(metrics_interval)
@@ -1446,8 +1465,8 @@ async def stream_metrics(request: Request):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
-        }
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -1472,21 +1491,18 @@ async def get_metrics_report():
     collector = get_prometheus_collector()
     if not collector:
         return JSONResponse(
-            {"error": "Prometheus collector not initialized"},
-            status_code=503
+            {"error": "Prometheus collector not initialized"}, status_code=503
         )
 
     try:
         report = await collector.get_5min_report(
-            manager=manager,
-            queue_manager=queue_manager
+            manager=manager, queue_manager=queue_manager
         )
         return report
     except Exception as e:
         logger.error(f"Error generating metrics report: {e}")
         return JSONResponse(
-            {"error": f"Failed to generate report: {str(e)}"},
-            status_code=500
+            {"error": f"Failed to generate report: {str(e)}"}, status_code=500
         )
 
 
@@ -1515,6 +1531,7 @@ async def get_all_models_status():
     if not status_tracker:
         # Fallback: baca dari file jika tracker belum ready
         from .core.model_status import ModelStatusTracker
+
         file_status = ModelStatusTracker.read_status_file()
         if file_status:
             return file_status
@@ -1537,7 +1554,7 @@ async def stream_models_status(request: Request):
     if not status_tracker:
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"error": "Status tracker not initialized"}
+            content={"error": "Status tracker not initialized"},
         )
 
     async def event_generator():
@@ -1561,8 +1578,7 @@ async def stream_models_status(request: Request):
                     # Wait for update dengan timeout untuk heartbeat
                     try:
                         update = await asyncio.wait_for(
-                            queue.get(),
-                            timeout=heartbeat_interval
+                            queue.get(), timeout=heartbeat_interval
                         )
 
                         # Send update
@@ -1573,7 +1589,7 @@ async def stream_models_status(request: Request):
                         # Send heartbeat
                         heartbeat_data = {
                             "timestamp": datetime.now().isoformat(),
-                            "server_status": status_tracker.server_status
+                            "server_status": status_tracker.server_status,
                         }
                         yield f"event: heartbeat\ndata: {json.dumps(heartbeat_data)}\n\n"
                         last_heartbeat = time.time()
@@ -1595,8 +1611,8 @@ async def stream_models_status(request: Request):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"  # Disable nginx buffering
-        }
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        },
     )
 
 
@@ -1621,7 +1637,7 @@ def get_vram_status():
         logger.exception(f"Error getting VRAM status: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Gagal membaca info VRAM: {e}"
+            detail=f"Gagal membaca info VRAM: {e}",
         )
 
 
@@ -1641,7 +1657,7 @@ async def get_model_vram_detail(model_alias: str):
             if model_alias not in manager.vram_tracker.model_tracks:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Model '{model_alias}' tidak ditemukan dalam VRAM tracking."
+                    detail=f"Model '{model_alias}' tidak ditemukan dalam VRAM tracking.",
                 )
 
             track = manager.vram_tracker.model_tracks[model_alias]
@@ -1659,29 +1675,34 @@ async def get_model_vram_detail(model_alias: str):
                     "current_gb": round(track.current_vram_used_mb / 1024, 2),
                     "average_mb": round(track.get_average_usage_mb(), 2),
                     "percentage_of_total": round(
-                        (track.current_vram_used_mb /
-                         vram_info["total_mb"]) * 100, 2
-                    ) if vram_info["total_mb"] > 0 else 0
+                        (track.current_vram_used_mb / vram_info["total_mb"]) * 100, 2
+                    )
+                    if vram_info["total_mb"] > 0
+                    else 0,
                 },
                 "load_info": {
-                    "start_time": track.load_start_time.isoformat() if track.load_start_time else None,
-                    "end_time": track.load_end_time.isoformat() if track.load_end_time else None,
+                    "start_time": track.load_start_time.isoformat()
+                    if track.load_start_time
+                    else None,
+                    "end_time": track.load_end_time.isoformat()
+                    if track.load_end_time
+                    else None,
                     "duration_sec": track.get_load_duration_sec(),
-                    "initial_free_vram_mb": round(track.initial_vram_free_mb, 2)
+                    "initial_free_vram_mb": round(track.initial_vram_free_mb, 2),
                 },
                 "snapshots": [
                     {
                         "timestamp": s.timestamp.isoformat(),
                         "vram_used_mb": round(s.vram_used_mb, 2),
-                        "status": s.status
+                        "status": s.status,
                     }
                     for s in track.snapshots
                 ],
                 "current_gpu_state": {
                     "total_mb": round(vram_info["total_mb"], 2),
                     "used_mb": round(vram_info["used_mb"], 2),
-                    "free_mb": round(vram_info["free_mb"], 2)
-                }
+                    "free_mb": round(vram_info["free_mb"], 2),
+                },
             }
 
     except HTTPException:
@@ -1690,7 +1711,7 @@ async def get_model_vram_detail(model_alias: str):
         logger.exception(f"Error getting VRAM detail for {model_alias}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Gagal membaca detail VRAM: {e}"
+            detail=f"Gagal membaca detail VRAM: {e}",
         )
 
 
@@ -1717,18 +1738,18 @@ def get_vram_summary():
                 {
                     "alias": m["model_alias"],
                     "vram_gb": m["vram_used_gb"],
-                    "percentage": m.get("vram_percentage", 0)
+                    "percentage": m.get("vram_percentage", 0),
                 }
                 for m in vram_report["models"]
                 if m["status"] == "loaded"
-            ]
+            ],
         }
 
     except Exception as e:
         logger.exception(f"Error getting VRAM summary: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Gagal membaca summary VRAM: {e}"
+            detail=f"Gagal membaca summary VRAM: {e}",
         )
 
 
@@ -1743,10 +1764,10 @@ def get_models():
                 "id": alias,
                 "object": "model",
                 "owned_by": "user",
-                "n_ctx": conf.params.n_ctx
+                "n_ctx": conf.params.n_ctx,
             }
             for alias, conf in config.models.items()
-        ]
+        ],
     }
 
 
@@ -1775,14 +1796,17 @@ async def get_queue_stats():
             "total_queued": total_queued,
             "total_processing": total_processing,
             "total_processed": total_processed,
-            "total_rejected": total_rejected
+            "total_rejected": total_rejected,
         },
-        "per_model": stats
+        "per_model": stats,
     }
 
 
 @app.post("/v1/chat/completions")
-async def proxy_chat_completions(request: Request):
+async def proxy_chat_completions(
+    request: Request,
+    idempotent_key: Optional[str] = Header(uuid.uuid4(), alias="X-Idempotency-Key"),
+):
     """
     Chat completions dengan request queue system.
 
@@ -1817,18 +1841,20 @@ async def eject_model(request: EjectRequest):
             return {
                 "status": "success",
                 "model_ejected": request.model,
-                "message": f"Model '{request.model}' berhasil dihentikan"
+                "message": f"Model '{request.model}' berhasil dihentikan",
             }
         else:
             return {
                 "status": "not_found",
                 "model_ejected": None,
-                "message": f"Model '{request.model}' tidak sedang berjalan."
+                "message": f"Model '{request.model}' tidak sedang berjalan.",
             }
     except Exception as e:
         logger.exception(f"Gagal eject model {request.model}: {e}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Gagal eject model: {e}")
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Gagal eject model: {e}",
+        )
 
 
 @app.get("/v1/models/{model_alias}/status")
@@ -1837,12 +1863,13 @@ async def get_model_loading_status(model_alias: str):
         status_info = await manager.get_model_status(model_alias)
         return {"model": model_alias, **status_info}
     except LookupError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
         logger.exception(f"Gagal mendapatkan status untuk {model_alias}: {e}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Gagal mendapatkan status: {e}")
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Gagal mendapatkan status: {e}",
+        )
 
 
 @app.post("/v1/models/{model_alias}/reset")
@@ -1862,20 +1889,20 @@ async def reset_model_failure(model_alias: str):
                     "status": "success",
                     "model": model_alias,
                     "message": f"Model failure status cleared. Had {failed_info['attempts']} failed attempts.",
-                    "previous_error": failed_info['error']
+                    "previous_error": failed_info["error"],
                 }
             else:
                 return {
                     "status": "not_found",
                     "model": model_alias,
-                    "message": f"Model '{model_alias}' has no failure record."
+                    "message": f"Model '{model_alias}' has no failure record.",
                 }
 
     except Exception as e:
         logger.exception(f"Error resetting model {model_alias}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to reset model: {e}"
+            detail=f"Failed to reset model: {e}",
         )
 
 
@@ -1884,17 +1911,14 @@ async def get_failed_models():
     """Get list of models that have failed to start."""
     async with manager.lock:
         if not manager.failed_models:
-            return {
-                "failed_models": [],
-                "message": "No failed models"
-            }
+            return {"failed_models": [], "message": "No failed models"}
 
         return {
             "failed_models": [
                 {
                     "model": alias,
                     "attempts": info["attempts"],
-                    "error": info["error"][:200]
+                    "error": info["error"][:200],
                 }
                 for alias, info in manager.failed_models.items()
             ]

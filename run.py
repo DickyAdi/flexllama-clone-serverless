@@ -49,12 +49,12 @@ def get_config_path() -> str:
 
 
 CONFIG_PATH = get_config_path()
-# STATUS_SERVER_PORT = 8001
+# # STATUS_SERVER_PORT = 8001
 STATUS_SERVER_HOST = os.getenv("STATUS_SERVER_HOST", "0.0.0.0")
 STATUS_SERVER_PORT = os.getenv("STATUS_SERVER_PORT", 80)
-STATUS_PING_COUNT = 0
-LATEST_PING = time.time()
-FASTAPI_PORT_OPEN = False
+# STATUS_PING_COUNT = 0
+# LATEST_PING = time.time()
+# FASTAPI_PORT_OPEN = False
 
 
 def init_status_file(config_data: dict):
@@ -153,26 +153,47 @@ def run_status_server_thread(host: str, port: int, stop_event: threading.Event):
                     host="127.0.0.1", port=8000
                 )
                 writer.close()
-                await writer.close()
+                await writer.wait_closed()
                 return True
             except:
                 return False
 
         async def health_check(request):
             """Simple health check."""
-            global STATUS_PING_COUNT, FASTAPI_PORT_OPEN, LATEST_PING
+            # global STATUS_PING_COUNT, FASTAPI_PORT_OPEN, LATEST_PING, _HEALTH_CHECK_LOCK
 
-            current_time = time.time()
-            if not FASTAPI_PORT_OPEN:
-                FASTAPI_PORT_OPEN = await fastapi_port_check()
-                if not FASTAPI_PORT_OPEN and STATUS_PING_COUNT >= 5:
-                    return web.Response(status=503, text="FastAPI failed to load")
+            try:
+                reader, writer = await asyncio.open_connection(
+                    host="127.0.0.1", port=8000
+                )
+                writer.close()
+                await writer.wait_closed()
 
-                if not FASTAPI_PORT_OPEN and (current_time - LATEST_PING) >= 10:
-                    STATUS_PING_COUNT += 1
-                    LATEST_PING = current_time
-                    return web.Response(status=204, text="Still loading FastAPI server")
-            return web.Response(status=200, text="OK")
+                return web.Response(status=200, text="OK")
+
+            except:
+                return web.Response(status=503, text="Failed")
+
+            # async with _HEALTH_CHECK_LOCK:
+            #     curr_time = time.time()
+
+            #     port_open = await fastapi_port_check()
+
+            #     if port_open:
+            #         STATUS_PING_COUNT = 0
+            #         FASTAPI_PORT_OPEN = True
+            #         LATEST_PING = curr_time
+            #         return web.Response(status=200, text="OK")
+
+            #     FASTAPI_PORT_OPEN = False
+
+            #     if (curr_time - LATEST_PING) >= 10:
+            #         STATUS_PING_COUNT += 1
+            #         LATEST_PING = curr_time
+
+            #     if STATUS_PING_COUNT <= 5:
+            #         return web.Response(status=204, text="Initializing")
+            #     return web.Response(status=503, text="Failed to start")
 
         async def sse_stream(request):
             """

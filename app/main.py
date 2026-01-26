@@ -732,7 +732,7 @@ async def _process_request_via_queue(
         logger.info(f'[IDEMPOTENT] Waiting for original process to finish')
         await event.wait()
 
-        async with idempotency_key:
+        async with IDEMPOTENT_LOCK:
             if idempotency_key in completed:
                 return completed[idempotency_key]
             else:

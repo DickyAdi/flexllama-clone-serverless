@@ -42,6 +42,9 @@ DEBUG_MODE = os.getenv("DEBUG", "false").lower() == "true"
 
 inflight_request: Dict[str, asyncio.Event] = {}
 completed: Dict[str, dict] = {}
+# Track background tasks yang perlu di-cancel
+background_tasks = []
+IDEMPOTENT_LOCK = asyncio.Lock()
 
 
 setup_logging(
@@ -202,6 +205,8 @@ async def app_shutdown():
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
 
+    await asyncio.gather(*background_tasks, return_exceptions=True)
+
     # Stop health monitor
     if health_monitor:
         logger.info("Stopping health monitor.")
@@ -271,9 +276,6 @@ shutdown_event = asyncio.Event()
 active_requests = 0
 active_requests_lock = asyncio.Lock()
 
-
-# Track background tasks yang perlu di-cancel
-background_tasks = []
 
 
 async def _sync_model_statuses():
@@ -702,20 +704,39 @@ async def _process_request_via_queue(
     Note: Runner is obtained by the queue processor, not here,
     to avoid double runner acquisition.
     """
-    if not completed[idempotency_key]:
-        idempotency_key = uuid.uuid4()
-
-    if idempotency_key in completed:
-        return completed[idempotency_key]
-
-    if idempotency_key in inflight_request:
-        event = inflight_request[idempotency_key]
-        await event.wait()
-        return completed[idempotency_key]
+    if not idempotency_key:
+        logger.info(f'[IDEMPOTENT] No idempotent key provided, falling back to manually assigning it.')
+        idempotency_key = str(uuid.uuid4())
 
     # Use provided timeout or default from config with multiplier
     if timeout is None:
         timeout = config.system.queue_timeout_sec * 3
+
+    async with IDEMPOTENT_LOCK:
+        if idempotency_key in completed:
+            logger.info(f'[IDEMPOTENT] Cache hit for key {idempotency_key}, returning cached response')
+            return completed[idempotency_key]
+        
+        logger.info('[IDEMPOTENT] Cache miss, checking for new request')
+        if idempotency_key in inflight_request:
+            logger.info(f'[IDEMPOTENT] Idempotent request detected.')
+            event = inflight_request[idempotency_key]
+            is_processor = False
+        else:
+            logger.info(f'[IDEMPOTENT] New request with key {idempotency_key}')
+            event = asyncio.Event()
+            inflight_request[idempotency_key] = event
+            is_processor = True
+
+    if not is_processor:
+        logger.info(f'[IDEMPOTENT] Waiting for original process to finish')
+        await event.wait()
+
+        async with idempotency_key:
+            if idempotency_key in completed:
+                return completed[idempotency_key]
+            else:
+                raise RuntimeError('Original request failed')
 
     enqueue_start = time.time()
 
@@ -739,6 +760,12 @@ async def _process_request_via_queue(
             prom_collector = get_prometheus_collector()
             if prom_collector:
                 prom_collector.record_queue_rejected(model_alias)
+
+            async with IDEMPOTENT_LOCK:
+                event = inflight_request.pop(idempotency_key, None)
+                if event:
+                    event.set()
+
             raise RuntimeError(
                 f"Queue for model '{model_alias}' is full ({queue.max_queue_size}). "
             )
@@ -766,13 +793,19 @@ async def _process_request_via_queue(
         )
         asyncio.create_task(_queue_processor(model_alias, queue, endpoint))
 
-    event = asyncio.Event()
-    inflight_request[idempotency_key] = event
     # Wait for result with timeout
     try:
         result = await asyncio.wait_for(response_future, timeout=timeout)
-        completed[idempotency_key] = result
-        event.set()
+
+        async with IDEMPOTENT_LOCK:
+            completed[idempotency_key] = result
+            event = inflight_request[idempotency_key]
+            if event:
+                event.set()
+
+        # asyncio.create_task(clean_completed_task(idempotency_key, 1800))
+        assign_to_background(clean_completed_task(idempotency_key, delay=1800))
+
         return result
     except asyncio.TimeoutError:
         wait_time = time.time() - enqueue_start
@@ -785,16 +818,33 @@ async def _process_request_via_queue(
                 queue.queue.remove(queued_req)
             except ValueError:
                 pass  # Already processed
-        raise TimeoutError(f"Request timeout after {timeout}s in queue")
-    finally:
-        inflight_request[idempotency_key] = None
-        asyncio.create_task(clean_completed_task(idempotency_key, 1800))
 
+        async with IDEMPOTENT_LOCK:
+            event = inflight_request.pop(idempotency_key, None)
+            if event:
+                event.set()
+        raise TimeoutError(f"Request timeout after {timeout}s in queue")
+    except Exception:
+        logger.error(f'[Queue] Request {request_id} encountered unexpected exception.')
+        async with IDEMPOTENT_LOCK:
+            event = inflight_request.pop(idempotency_key, None)
+            if event:
+                event.set()
+        raise
+
+def assign_to_background(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    background_tasks.append(task)
+    task.add_done_callback(background_tasks.remove(task))
+    return task
 
 async def clean_completed_task(key: str, delay: int) -> None:
-    await asyncio.sleep(delay)
-    completed.pop(key, None)
-    logger.info(f"Cleaning completed response for {key}")
+    try:
+        await asyncio.sleep(delay)
+        completed.pop(key, None)
+        logger.info(f"Cleaning completed response for {key}")
+    except asyncio.CancelledError:
+        raise
 
 
 async def _queue_processor(model_alias: str, queue: ModelRequestQueue, endpoint: str):
@@ -1819,7 +1869,7 @@ async def proxy_chat_completions(
     Headers:
     - X-Request-Priority: high|normal|low (optional, default: normal)
     """
-    return await _proxy_request_with_queue(request, "/v1/chat/completions")
+    return await _proxy_request_with_queue(request, "/v1/chat/completions", idempotency_key=idempotent_key)
 
 
 @app.post("/v1/embeddings")

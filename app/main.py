@@ -45,6 +45,7 @@ completed: Dict[str, dict] = {}
 # Track background tasks yang perlu di-cancel
 background_tasks = []
 IDEMPOTENT_LOCK = asyncio.Lock()
+IDEMPOTENT_EMBEDDING_LOCK = asyncio.Lock()
 
 
 setup_logging(
@@ -705,7 +706,7 @@ async def _process_request_via_queue(
     to avoid double runner acquisition.
     """
     if not idempotency_key:
-        logger.info(f'[IDEMPOTENT] No idempotent key provided, falling back to manually assigning it.')
+        logger.info('[IDEMPOTENT] No idempotent key provided, falling back to manually assigning it.')
         idempotency_key = str(uuid.uuid4())
 
     # Use provided timeout or default from config with multiplier
@@ -719,7 +720,7 @@ async def _process_request_via_queue(
         
         logger.info('[IDEMPOTENT] Cache miss, checking for new request')
         if idempotency_key in inflight_request:
-            logger.info(f'[IDEMPOTENT] Idempotent request detected.')
+            logger.info('[IDEMPOTENT] Idempotent request detected.')
             event = inflight_request[idempotency_key]
             is_processor = False
         else:
@@ -729,7 +730,7 @@ async def _process_request_via_queue(
             is_processor = True
 
     if not is_processor:
-        logger.info(f'[IDEMPOTENT] Waiting for original process to finish')
+        logger.info('[IDEMPOTENT] Waiting for original process to finish')
         await event.wait()
 
         async with IDEMPOTENT_LOCK:
@@ -1131,11 +1132,40 @@ async def _proxy_request_with_queue(
         )
 
 
-async def _proxy_embeddings(request: Request):
+async def _proxy_embeddings(request: Request, idempotency_key: Optional[str]=None):
     """
     Embeddings endpoint dengan format OpenAI-compatible.
     """
+    if not idempotency_key:
+        idempotency_key = str(uuid.uuid4())
+
+    async with IDEMPOTENT_EMBEDDING_LOCK:
+        if idempotency_key in inflight_request:
+            logger.info(f'[IDEMPOTENT] Cache hit for key {idempotency_key}, returning cached result')
+            return completed[idempotency_key]
+        logger.info('[IDEMPOTENT] Cache miss, checking for new request')
+        if idempotency_key in inflight_request:
+            logger.info('[IDEMPOTENT] Idempotent request detected')
+            event = inflight_request[idempotency_key]
+            is_processor = False
+        else:
+            logger.info(f'[IDEMPOTENT] New request with key {idempotency_key}')
+            event = asyncio.Event()
+            inflight_request[idempotency_key] = event
+            is_processor = True
+
+    if not is_processor:
+        logger.info('[IDEMPOTENT] Waiting for original request to finish')
+        await event.wait()
+
+        async with IDEMPOTENT_EMBEDDING_LOCK:
+            if idempotency_key in completed:
+                return completed[idempotency_key]
+            else:
+                raise RuntimeError('Original request failed')
+            
     try:
+
         # Baca body request
         body = await request.json()
         model_alias = body.get("model")
@@ -1240,6 +1270,14 @@ async def _proxy_embeddings(request: Request):
 
             # Estimate tokens (rough: ~1 token per 4 chars)
             total_tokens += len(text) // 4
+
+        async with IDEMPOTENT_EMBEDDING_LOCK:
+            completed[idempotency_key] = all_embeddings
+            event = inflight_request[idempotency_key]
+            if event:
+                event.set()
+
+        assign_to_background(clean_completed_task(idempotency_key, delay=1800))
 
         request.state.queue_time = time.time() - queue_start
         request.state.tokens_generated = 0  # Embeddings don't generate tokens
@@ -1873,11 +1911,21 @@ async def proxy_chat_completions(
 
 
 @app.post("/v1/embeddings")
-async def proxy_embeddings(request: Request):
+async def proxy_embeddings(request: Request, idempotent_key: Optional[str] = Header(uuid.uuid4(), alias="X-Idempotency-Key")):
     """
     Embeddings.
     """
-    return await _proxy_embeddings(request)
+    # return await _proxy_embeddings(request)
+    try:
+        response = await _proxy_embeddings(request, idempotency_key=idempotent_key)
+        return response
+    except Exception:
+        async with IDEMPOTENT_EMBEDDING_LOCK:
+            event = inflight_request.get(idempotent_key)
+            if event:
+                event.set()
+        raise
+
 
 
 @app.post("/v1/models/eject")

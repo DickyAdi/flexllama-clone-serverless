@@ -128,23 +128,25 @@ class RunnerProcess:
 
         params = self.config.params
         model_path = self.config.get_resolved_path()  # Use resolved path
+        parallel = self.system_config.parallel_requests or 2
 
         if model_path in self._gguf_cache:
             parallel, model_info = self._gguf_cache[model_path]
             logger.debug(f"[{self.alias}] Using cached GGUF metadata")
         else:
             # Determine optimal parallel setting using GGUF metadata
-            base_parallel = params.parallel_override if params.parallel_override else self.system_config.parallel_requests
+            # base_parallel = params.parallel_override if params.parallel_override else self.system_config.parallel_requests
 
-            parallel, parallel_reason = get_optimal_parallel(
-                model_path=model_path,
-                n_ctx=params.n_ctx,
-                default_parallel=base_parallel,
-                min_ctx_per_slot=2048
-            )
+            parallel = self.system_config.parallel_requests
+            # parallel, parallel_reason = get_optimal_parallel(
+            #     model_path=model_path,
+            #     n_ctx=params.n_ctx,
+            #     default_parallel=base_parallel,
+            #     min_ctx_per_slot=2048
+            # )
 
-            if parallel != base_parallel:
-                logger.info(f"[{self.alias}] {parallel_reason}")
+            # if parallel != base_parallel:
+            #     logger.info(f"[{self.alias}] {parallel_reason}")
 
         # Get model info
         model_info = get_model_info(model_path)
@@ -195,6 +197,8 @@ class RunnerProcess:
 
         # Flash Attention
         command.extend(["-fa", self.system_config.flash_attention])
+        # if self.system_config.flash_attention == 'on' or 'auto':
+        #     command.extend(['-fa'])
 
         # Memory mapping (conditional)
         if not self.system_config.use_mmap:

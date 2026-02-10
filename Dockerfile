@@ -1,5 +1,6 @@
 # Base dari pre-built llama-server dengan CUDA support (ringan, ~1.5GB)
 FROM ghcr.io/ggml-org/llama.cpp:server-cuda
+# FROM ghcr.io/ggerganov/llama.cpp:server-cuda-b4719
 
 # Set non-interaktif mode untuk apt dan timezone
 ENV DEBIAN_FRONTEND=noninteractive

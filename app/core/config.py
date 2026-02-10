@@ -142,7 +142,7 @@ class SystemConfig(BaseModel):
     )
 
     parallel_requests: int = Field(
-        default=4,
+        default=2,
         ge=1,
         le=32,
         description="Jumlah slot parallel request per model (llama.cpp --parallel). "

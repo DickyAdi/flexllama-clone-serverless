@@ -392,6 +392,11 @@ class ModelParams(BaseModel):
                     "Untuk context panjang (>32K), gunakan q4_0 atau q8_0 untuk hemat VRAM."
     )
 
+    additional_parameter: Optional[str] = Field(
+        default='',
+        description="Additional raw llama.cpp-server command"
+    )
+
     @field_validator('type_k', 'type_v')
     @classmethod
     def validate_cache_type(cls, v: Optional[str]) -> Optional[str]:

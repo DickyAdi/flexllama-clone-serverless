@@ -217,6 +217,10 @@ class RunnerProcess:
 
         model_size_gb = Path(self.config.get_resolved_path()
                              ).stat().st_size / (1024**3)
+        
+        if params.additional_parameter:
+            logger.info('Injecting additional raw parameters')
+            command.extend([params.additional_parameter])
 
         if model_info and model_info.block_count > 20:
             logger.info(
@@ -239,6 +243,7 @@ class RunnerProcess:
         self.log_handle = log_handle  # Store early for cleanup in stop()
 
         try:
+            logger.info(f'Running {self.config.get_resolved_path()} - command [{command}]')
             self.process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=log_handle,

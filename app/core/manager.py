@@ -118,8 +118,8 @@ class RunnerProcess:
 
     async def start(self):
         if self.is_alive():
-            logger.warning(
-                f"[{self.alias}] Proses sudah berjalan.")
+            # logger.warning(
+            #     f"[{self.alias}] Proses sudah berjalan.")
             return
 
         # Track start time
@@ -128,7 +128,7 @@ class RunnerProcess:
 
         params = self.config.params
         model_path = self.config.get_resolved_path()  # Use resolved path
-        parallel = self.system_config.parallel_requests or 2
+        # parallel = self.system_config.parallel_requests or 2
 
         if model_path in self._gguf_cache:
             parallel, model_info = self._gguf_cache[model_path]
@@ -137,7 +137,8 @@ class RunnerProcess:
             # Determine optimal parallel setting using GGUF metadata
             # base_parallel = params.parallel_override if params.parallel_override else self.system_config.parallel_requests
 
-            parallel = self.system_config.parallel_requests
+            # parallel = self.system_config.parallel_requests
+            parallel = params.parallel_requests
             # parallel, parallel_reason = get_optimal_parallel(
             #     model_path=model_path,
             #     n_ctx=params.n_ctx,
@@ -158,11 +159,11 @@ class RunnerProcess:
         self.model_info = model_info
 
         # Log model info for debugging
-        if model_info:
-            swa_status = f"SWA={model_info.swa_window_size}" if model_info.is_swa else "non-SWA"
-            logger.info(
-                f"[{self.alias}] Model: {model_info.name} | Arch: {model_info.architecture} | SWA Status: {swa_status} | Layers: {model_info.block_count} | Parallel: {parallel}"
-            )
+        # if model_info:
+        #     swa_status = f"SWA={model_info.swa_window_size}" if model_info.is_swa else "non-SWA"
+        #     logger.info(
+        #         f"[{self.alias}] Model: {model_info.name} | Arch: {model_info.architecture} | SWA Status: {swa_status} | Layers: {model_info.block_count} | Parallel: {parallel}"
+        #     )
 
         command = [
             self.llama_server_path, "--model", self.config.get_resolved_path(),
@@ -188,12 +189,14 @@ class RunnerProcess:
         # Batch size (with per-model override)
         batch_size = params.batch_override if params.batch_override else params.n_batch
         command.extend(["--batch-size", str(batch_size)])
+        command.extend(['--ubatch-size', str(params.n_ubatch)])
 
         # Parallel requests (already adjusted above for SWA models)
         command.extend(["--parallel", str(parallel)])
 
         # CPU threads
-        command.extend(["--threads", str(self.system_config.cpu_threads)])
+        # command.extend(["--threads", str(self.system_config.cpu_threads)])
+        command.extend(["--threads", str(params.cpu_threads)])
 
         # Flash Attention
         command.extend(["-fa", self.system_config.flash_attention])
@@ -237,8 +240,8 @@ class RunnerProcess:
             # Small delay to allow system to stabilize
             await asyncio.sleep(0.5)
 
-            logger.info(
-                f"[{self.alias}] Memory cleanup complete. Starting load.")
+            # logger.info(
+            #     f"[{self.alias}] Memory cleanup complete. Starting load.")
 
         self.startup_error = None
 
@@ -515,9 +518,9 @@ class ModelManager:
         max_time = 300
         timeout_enabled = self.config.system.enable_idle_timeout
 
-        if not timeout_enabled:
-            logger.info(
-                "[Idle Watchdog] Idle timeout DISABLED. Models akan tetap loaded di VRAM.")
+        # if not timeout_enabled:
+        #     logger.info(
+        #         "[Idle Watchdog] Idle timeout DISABLED. Models akan tetap loaded di VRAM.")
 
         try:
             while not self.shutdown_event.is_set():
@@ -696,7 +699,7 @@ class ModelManager:
                     safety_buffer_mb=200  # 200MB safety buffer
                 )
 
-                logger.info(f"[{model_alias}] VRAM check: {vram_message}")
+                # logger.info(f"[{model_alias}] VRAM check: {vram_message}")
 
                 if not can_load:
                     # Not enough VRAM - cleanup and reject
@@ -722,8 +725,8 @@ class ModelManager:
                         loaded_models=loaded_models
                     )
 
-                logger.info(
-                    f"[{model_alias}] VRAM check passed - proceeding with load")
+                # logger.info(
+                #     f"[{model_alias}] VRAM check passed - proceeding with load")
 
         # Retry logic with proper error handling
         max_retries = runner.max_retries

@@ -141,29 +141,31 @@ class SystemConfig(BaseModel):
                     "• [0, 1]: Multi-GPU (untuk future support)."
     )
 
-    parallel_requests: int = Field(
-        default=2,
-        ge=1,
-        le=32,
-        description="Jumlah slot parallel request per model (llama.cpp --parallel). "
-                    "Mempengaruhi berapa request yang bisa diproses bersamaan oleh satu model. "
-                    "Trade-off: lebih tinggi = throughput lebih besar, tapi VRAM usage naik. "
-                    "• 1-2: Model besar (>13B) atau context besar (>32K). "
-                    "• 4-8: Model medium (7-13B). "
-                    "• 8-16: Model kecil (<7B) dengan context kecil."
-    )
+    ### MOVED TO MODEL CONFIG
+    # parallel_requests: int = Field(
+    #     default=2,
+    #     ge=1,
+    #     le=32,
+    #     description="Jumlah slot parallel request per model (llama.cpp --parallel). "
+    #                 "Mempengaruhi berapa request yang bisa diproses bersamaan oleh satu model. "
+    #                 "Trade-off: lebih tinggi = throughput lebih besar, tapi VRAM usage naik. "
+    #                 "• 1-2: Model besar (>13B) atau context besar (>32K). "
+    #                 "• 4-8: Model medium (7-13B). "
+    #                 "• 8-16: Model kecil (<7B) dengan context kecil."
+    # )
 
-    cpu_threads: int = Field(
-        default=8,
-        ge=1,
-        le=64,
-        description="Jumlah CPU threads untuk operasi non-GPU (llama.cpp --threads). "
-                    "Biasanya untuk tokenization dan post-processing. "
-                    "Rekomendasi: setengah dari jumlah physical cores. "
-                    "• 4-8: CPU 8-16 cores. "
-                    "• 8-16: CPU 16-32 cores. "
-                    "• 16+: Server dengan banyak cores."
-    )
+    ### MOVED TO MODEL CONFIG
+    # cpu_threads: int = Field(
+    #     default=8,
+    #     ge=1,
+    #     le=64,
+    #     description="Jumlah CPU threads untuk operasi non-GPU (llama.cpp --threads). "
+    #                 "Biasanya untuk tokenization dan post-processing. "
+    #                 "Rekomendasi: setengah dari jumlah physical cores. "
+    #                 "• 4-8: CPU 8-16 cores. "
+    #                 "• 8-16: CPU 16-32 cores. "
+    #                 "• 16+: Server dengan banyak cores."
+    # )
 
     use_mmap: bool = Field(
         default=True,
@@ -317,15 +319,21 @@ class ModelParams(BaseModel):
                     "Catatan: VRAM untuk KV cache ≈ n_ctx * 0.5MB (estimasi kasar)."
     )
 
-    n_batch: int = Field(
-        default=256,
-        ge=128,
-        le=512,
+    n_batch: Optional[int] = Field(
+        default=2048,
+        # ge=128,
+        # le=512,
         description="Logical batch size untuk prompt processing. "
                     "Mempengaruhi kecepatan processing prompt panjang. "
                     "• 128-256: Untuk GPU dengan VRAM terbatas. "
                     "• 256-512: Untuk GPU dengan VRAM cukup. "
                     "Catatan: Nilai lebih tinggi = prompt processing lebih cepat."
+    )
+
+    n_ubatch:Optional[int] = Field(
+        default=512,
+        ge=512,
+        description="Increasing physical batch, works by micro-batching logical batch to attention head."
     )
 
     rope_freq_base: Optional[int] = Field(
@@ -395,6 +403,30 @@ class ModelParams(BaseModel):
     additional_parameter: Optional[str] = Field(
         default='',
         description="Additional raw llama.cpp-server command"
+    )
+
+    cpu_threads: Optional[int] = Field(
+        default=8,
+        ge=-1,
+        le=64,
+        description="Jumlah CPU threads untuk operasi non-GPU (llama.cpp --threads). "
+                    "Biasanya untuk tokenization dan post-processing. "
+                    "Rekomendasi: setengah dari jumlah physical cores. "
+                    "• 4-8: CPU 8-16 cores. "
+                    "• 8-16: CPU 16-32 cores. "
+                    "• 16+: Server dengan banyak cores."
+    )
+
+    parallel_requests: Optional[int] = Field(
+        default=2,
+        ge=1,
+        le=32,
+        description="Jumlah slot parallel request per model (llama.cpp --parallel). "
+                    "Mempengaruhi berapa request yang bisa diproses bersamaan oleh satu model. "
+                    "Trade-off: lebih tinggi = throughput lebih besar, tapi VRAM usage naik. "
+                    "• 1-2: Model besar (>13B) atau context besar (>32K). "
+                    "• 4-8: Model medium (7-13B). "
+                    "• 8-16: Model kecil (<7B) dengan context kecil."
     )
 
     @field_validator('type_k', 'type_v')

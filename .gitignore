@@ -233,4 +233,4 @@ config.json
 configOriginal.json
 model_status.json
 benchmark_router.py
-config*
+config*.json

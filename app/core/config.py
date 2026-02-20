@@ -429,6 +429,11 @@ class ModelParams(BaseModel):
                     "• 8-16: Model kecil (<7B) dengan context kecil."
     )
 
+    reranker: Optional[bool] = Field(
+        default=False,
+        description="Whether the model is reranker model or not"
+    )
+
     @field_validator('type_k', 'type_v')
     @classmethod
     def validate_cache_type(cls, v: Optional[str]) -> Optional[str]:

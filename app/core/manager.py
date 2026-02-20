@@ -203,6 +203,9 @@ class RunnerProcess:
         # if self.system_config.flash_attention == 'on' or 'auto':
         #     command.extend(['-fa'])
 
+        if params.reranker:
+            command.append('--reranking')
+
         # Memory mapping (conditional)
         if not self.system_config.use_mmap:
             command.append("--no-mmap")

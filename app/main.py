@@ -34,6 +34,9 @@ from .core.prometheus_metrics import (
     PrometheusMetricsCollector,
 )
 
+from .http import RerankRequest
+from typing import Set
+
 
 # CONFIG_PATH bisa di-set via environment variable, default ke config.json
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -43,9 +46,10 @@ DEBUG_MODE = os.getenv("DEBUG", "false").lower() == "true"
 inflight_request: Dict[str, asyncio.Event] = {}
 completed: Dict[str, dict] = {}
 # Track background tasks yang perlu di-cancel
-background_tasks = []
+background_tasks: Set[asyncio.Task] = set()
 IDEMPOTENT_LOCK = asyncio.Lock()
 IDEMPOTENT_EMBEDDING_LOCK = asyncio.Lock()
+IDEMPOTENT_RERANK_LOCK = asyncio.Lock()
 
 
 setup_logging(
@@ -168,8 +172,9 @@ async def app_startup():
         health_monitor.start()
 
         logger.info("Starting model status sync task.")
-        status_sync_task = asyncio.create_task(_sync_model_statuses())
-        background_tasks.append(status_sync_task)
+        # status_sync_task = asyncio.create_task(_sync_model_statuses())
+        # background_tasks.append(status_sync_task)
+        assign_to_background(_sync_model_statuses())
 
         await status_tracker.set_server_status("ready")
 
@@ -198,15 +203,14 @@ async def app_shutdown():
 
     # Cancel all background tasks first
     logger.info(f"Cancelling {len(background_tasks)} background tasks.")
-    for task in background_tasks:
-        if not task.done():
-            task.cancel()
-            try:
-                await asyncio.wait_for(task, timeout=2.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
+    pending = [t for t in background_tasks if not t.done()]
+    for task in pending:
+        task.cancel()
 
-    await asyncio.gather(*background_tasks, return_exceptions=True)
+    if pending:
+        logger.info(f"Waiting for {len(pending)} background tasks to cancel...")
+        await asyncio.gather(*pending, return_exceptions=True)
+        await asyncio.gather(*background_tasks, return_exceptions=True)
 
     # Stop health monitor
     if health_monitor:
@@ -835,8 +839,9 @@ async def _process_request_via_queue(
 
 def assign_to_background(coro) -> asyncio.Task:
     task = asyncio.create_task(coro)
-    background_tasks.append(task)
-    task.add_done_callback(background_tasks.remove(task))
+    # background_tasks.append(task)
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
     return task
 
 async def clean_completed_task(key: str, delay: int) -> None:
@@ -844,6 +849,11 @@ async def clean_completed_task(key: str, delay: int) -> None:
         await asyncio.sleep(delay)
         completed.pop(key, None)
         logger.info(f"Cleaning completed response for {key}")
+        logger.info(f"Checking hanging in-flight request, for key {key}")
+        if key in inflight_request:
+            logger.warning(f"Cleaning hanging in-flight request for key {key}")
+            event = inflight_request.pop(key)
+            event.set()
     except asyncio.CancelledError:
         raise
 
@@ -1130,6 +1140,95 @@ async def _proxy_request_with_queue(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail
         )
+    
+async def execute_rerank(request: RerankRequest, idempotent_key:Optional[str]=None):
+    if not idempotent_key:
+        idempotent_key = str(uuid.uuid4())
+
+    if idempotent_key in completed:
+        logger.info(f'[IDEMPOTENT] Cache hit in rerank for key {idempotent_key}, returning cached result')
+        result = completed.get(idempotent_key, None)
+        if result:
+            return result
+        
+    event = None
+    is_processor = False
+    async with IDEMPOTENT_RERANK_LOCK:
+        logger.info('[IDEMPOTENT] Cache miss or cache empty, proceed to compute')
+        if idempotent_key in inflight_request:
+            logger.info(f'[IDEMPOTENT] Idempotent request detected {idempotent_key}')
+            event = inflight_request[idempotent_key]
+        else:
+            logger.info(f'[IDEMPOTENT] New request with key {idempotent_key}')
+            event = asyncio.Event()
+            inflight_request[idempotent_key] = event
+            is_processor = True
+
+    if not is_processor:
+        logger.info('[IDEMPOTENT] Waiting for original request to finish')
+        try:
+            await event.wait()
+        except asyncio.CancelledError:
+            raise
+
+        if idempotent_key in completed:
+            return completed[idempotent_key]
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Original request processing failed"
+            )
+            
+    try:
+        model_alias = request.model # no need validation, automatically handled by pydantic
+        model_config = config.models.get(model_alias)
+        if not model_config:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail=f'No {model_alias} in model config')
+        
+        if not model_config.params.reranker:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail='Model doesnt support reranking')
+        
+        json_body = request.model_dump_json()
+        runner = await manager.get_runner_for_request(model_alias)
+        internal_url = f"{runner.url}/v1/rerank"
+
+        req = http_client.build_request(
+            method="POST",
+            url=internal_url,
+            content=json_body,
+            headers={"Content-Type":"application/json"}
+        )
+
+        response = await http_client.send(req)
+        response.raise_for_status()
+
+        result = response.json()
+
+        async with IDEMPOTENT_RERANK_LOCK:
+            completed[idempotent_key] = result
+            if event:
+                event.set()
+            inflight_request.pop(idempotent_key, None)
+
+        assign_to_background(clean_completed_task(idempotent_key, delay=1800))
+
+        return result
+        
+
+    except HTTPException:
+        async with IDEMPOTENT_RERANK_LOCK:
+            event.set()
+            inflight_request.pop(idempotent_key, None)
+        raise
+    except Exception as e:
+        logger.error('Failed to compute rerank', exc_info=e)
+        async with IDEMPOTENT_RERANK_LOCK:
+            event.set()
+            inflight_request.pop(idempotent_key, None)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail='Something went wrong, please try again later.')
 
 
 async def _proxy_embeddings(request: Request, idempotency_key: Optional[str]=None):
@@ -1140,7 +1239,7 @@ async def _proxy_embeddings(request: Request, idempotency_key: Optional[str]=Non
         idempotency_key = str(uuid.uuid4())
 
     async with IDEMPOTENT_EMBEDDING_LOCK:
-        if idempotency_key in inflight_request:
+        if idempotency_key in completed:
             logger.info(f'[IDEMPOTENT] Cache hit for key {idempotency_key}, returning cached result')
             return completed[idempotency_key]
         logger.info('[IDEMPOTENT] Cache miss, checking for new request')
@@ -1926,6 +2025,14 @@ async def proxy_embeddings(request: Request, idempotent_key: Optional[str] = Hea
                 event.set()
         raise
 
+
+@app.post("/v1/rerank")
+async def proxy_rerank(request: RerankRequest, idempotent_key: Optional[str] = Header(None, alias="X-Idempotency-Key")):
+    response = await execute_rerank(request, idempotent_key)
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content=response,
+    )
 
 
 @app.post("/v1/models/eject")
